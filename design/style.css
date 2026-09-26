@@ -1,0 +1,37 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: Arial, sans-serif; font-size: 14px; color: #000; background: #fff; }
+
+.app { display: flex; flex-direction: column; height: 100vh; border: 1px solid #000; }
+
+.topbar { display: flex; align-items: center; gap: 16px; padding: 8px 12px; border-bottom: 1px solid #000; }
+.app-name { font-weight: bold; }
+.tabs { display: flex; gap: 6px; }
+.tab { border: 1px solid #000; padding: 4px 10px; }
+.tab.active { background: #000; color: #fff; }
+.spacer { flex: 1; }
+.field { border: 1px solid #000; padding: 4px 8px; }
+.btn { border: 1px solid #000; padding: 4px 10px; background: #fff; }
+
+.body { display: flex; flex: 1; min-height: 0; }
+.sidebar { width: 220px; border-right: 1px solid #000; padding: 8px; overflow: auto; }
+.sidebar h4 { margin: 0 0 6px; }
+.tree-item { border: 1px dashed #000; padding: 4px 6px; margin-bottom: 4px; }
+.tree-item.nested { margin-left: 14px; }
+
+.main { flex: 1; padding: 12px; overflow: auto; }
+.panel { border: 1px solid #000; padding: 8px; margin-bottom: 10px; }
+.panel h4 { margin: 0 0 6px; }
+.row { display: flex; gap: 10px; }
+.col { flex: 1; }
+.line { border: 1px dashed #000; padding: 4px 6px; margin-bottom: 4px; }
+.tag { border: 1px solid #000; padding: 1px 6px; font-size: 12px; }
+.placeholder { border: 1px dashed #000; padding: 24px; text-align: center; color: #555; }
+
+.statusbar { border-top: 1px solid #000; padding: 4px 12px; font-size: 12px; display: flex; gap: 16px; }
+
+.node { position: absolute; border: 1px solid #000; padding: 6px 10px; background: #fff; width: 130px; }
+.node .type { font-size: 11px; color: #555; }
+.canvas-area { position: relative; border: 1px solid #000; height: 480px; overflow: hidden; }
+.edge { position: absolute; border-top: 1px dashed #000; transform-origin: 0 0; }
+.edge-label { position: absolute; font-size: 11px; background: #fff; padding: 0 3px; }

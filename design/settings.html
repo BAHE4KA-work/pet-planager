@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Planager — Настройки</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="app-name">Planager</div>
+    <div class="tabs">
+      <div class="tab">База знаний</div>
+      <div class="tab">Холст</div>
+      <div class="tab">Библиотека юнитов</div>
+      <div class="tab active">Настройки</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+      <h4>Разделы</h4>
+      <div class="tree-item">Тема оформления</div>
+      <div class="tree-item">Контекстные цвета</div>
+      <div class="tree-item">ИИ-ассистент (API)</div>
+      <div class="tree-item">Git-версионирование</div>
+      <div class="tree-item">Язык</div>
+    </div>
+
+    <div class="main">
+      <div class="panel">
+        <h4>Тема оформления</h4>
+        <div class="line">○ Тёмная &nbsp; ○ Светлая &nbsp; ● Системная</div>
+      </div>
+
+      <div class="panel">
+        <h4>Контекстные цвета</h4>
+        <div class="row">
+          <div class="col">Положительная область: <span class="tag">[оттенок]</span> — изменить</div>
+          <div class="col">Отрицательная область: <span class="tag">[оттенок]</span> — изменить</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h4>ИИ-ассистент</h4>
+        <div class="line">Endpoint (OpenAI-совместимый): <span class="field">https://…</span></div>
+        <div class="line">API-ключ: <span class="field">••••••••</span></div>
+        <div class="line">☑ Включить ИИ-функции (по умолчанию — выключено, ручной режим)</div>
+      </div>
+
+      <div class="panel">
+        <h4>Git-версионирование</h4>
+        <div class="line">☑ Подключить git к проекту</div>
+        <div class="line">Текущая ветка: main</div>
+        <div class="btn">Открыть историю изменений</div>
+      </div>
+
+      <div class="panel">
+        <h4>Язык интерфейса</h4>
+        <div class="line">● Русский (по умолчанию) &nbsp; ○ English (в разработке)</div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

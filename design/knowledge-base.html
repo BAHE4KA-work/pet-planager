@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Planager — База знаний</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="app-name">Planager</div>
+    <div class="tabs">
+      <div class="tab active">База знаний</div>
+      <div class="tab">Холст</div>
+      <div class="tab">Библиотека юнитов</div>
+      <div class="tab">Настройки</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="field">Поиск / фильтр (тип, статус, MVP)</div>
+    <div class="btn">ИИ-ассистент</div>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+      <h4>Файлы проекта</h4>
+      <div class="tree-item">sys_inventory.pgr</div>
+      <div class="tree-item nested">cls_item — активен</div>
+      <div class="tree-item nested">obj_sword_excalibur</div>
+      <div class="tree-item nested">cmp_durability</div>
+      <div class="tree-item">sys_factions.pgr</div>
+      <div class="tree-item">idea_backlog.pgr</div>
+    </div>
+
+    <div class="main">
+      <div class="row">
+        <div class="col" style="flex:2">
+          <div class="panel">
+            <h4>Редактор — cls_item [строки 1–20]</h4>
+            <div class="line">## Класс: Предмет</div>
+            <div class="line">id: cls_item &nbsp; parent: sys_inventory &nbsp; extends: -</div>
+            <div class="line">Поля: name: string, weight: float</div>
+            <div class="line">Методы: + use()   - validate()</div>
+            <div class="line">Компоненты: cmp_durability, cmp_stackable</div>
+            <div class="line">Использует: proc_pickup_item</div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="panel">
+            <h4>Свойства элемента</h4>
+            <div class="line">Тип: Класс</div>
+            <div class="line">id: cls_item</div>
+            <div class="line">Родитель: sys_inventory</div>
+            <div class="line">Статус: <span class="tag">черновик</span></div>
+            <div class="line">Метка: <span class="tag">MVP</span></div>
+            <div class="line">Связано (has): cmp_durability, cmp_stackable</div>
+            <div class="line">Связано (used by): obj_sword_excalibur</div>
+          </div>
+          <div class="panel">
+            <h4>Предложения ассистента</h4>
+            <div class="line">⚠ Возможное противоречие с cls_weapon по полю weight</div>
+            <div class="line">Предложение: добавить компонент cmp_rarity</div>
+            <div class="btn">Применить</div>
+            <div class="btn">Отклонить</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div>git: main, изменён 1 файл</div>
+    <div>Курсор: строка 4</div>
+  </div>
+</div>
+</body>
+</html>

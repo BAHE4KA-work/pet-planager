@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Planager — Холст</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="app-name">Planager</div>
+    <div class="tabs">
+      <div class="tab">База знаний</div>
+      <div class="tab active">Холст</div>
+      <div class="tab">Библиотека юнитов</div>
+      <div class="tab">Настройки</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="field">Фильтр связей: ☐ contains ☐ extends ☐ has ☐ instance_of ☐ uses ☐ notes</div>
+    <div class="btn">ИИ-ассистент</div>
+  </div>
+
+  <div class="body">
+    <div class="sidebar">
+      <h4>Легенда</h4>
+      <div class="line">— contains (иерархия)</div>
+      <div class="line">-- extends (наследование)</div>
+      <div class="line">— has (композиция)</div>
+      <div class="line">— instance_of</div>
+      <div class="line">— uses</div>
+      <div class="line">·· notes (идея)</div>
+      <div class="btn">Развернуть все / Свернуть</div>
+    </div>
+
+    <div class="main">
+      <div class="canvas-area">
+        <div class="node" style="left:40px; top:40px;"><div class="type">Система</div>sys_inventory</div>
+        <div class="node" style="left:280px; top:40px;"><div class="type">Класс · MVP</div>cls_item</div>
+        <div class="node" style="left:280px; top:180px;"><div class="type">Компонент</div>cmp_durability</div>
+        <div class="node" style="left:520px; top:40px;"><div class="type">Объект</div>obj_sword_excalibur</div>
+        <div class="node" style="left:280px; top:320px;"><div class="type">Процесс</div>proc_pickup_item</div>
+        <div class="node" style="left:40px; top:320px;"><div class="type">Идея (отдельно)</div>idea_backlog</div>
+
+        <div class="edge" style="left:170px; top:70px; width:110px;"></div>
+        <div class="edge-label" style="left:190px; top:58px;">contains</div>
+
+        <div class="edge" style="left:410px; top:70px; width:110px;"></div>
+        <div class="edge-label" style="left:415px; top:58px;">instance_of</div>
+
+        <div class="edge" style="left:340px; top:80px; width:2px; transform: rotate(90deg) translate(0,0);"></div>
+        <div class="edge-label" style="left:345px; top:120px;">has</div>
+
+        <div class="edge" style="left:340px; top:220px; width:2px; transform: rotate(90deg);"></div>
+        <div class="edge-label" style="left:345px; top:260px;">uses</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div>Показано: 6 из 12 элементов</div>
+    <div>Масштаб: 100% (- / +)</div>
+  </div>
+</div>
+</body>
+</html>
