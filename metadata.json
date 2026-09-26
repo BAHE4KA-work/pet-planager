@@ -1,0 +1,8 @@
+{
+  "name": "Planager",
+  "description": "Блочно-визуальная среда проектирования и моделирования архитектуры IT-проектов и игр в человекочитаемом формате .pgr с поддержкой графа связей, базы знаний, Git-диффов и ИИ-анализа.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

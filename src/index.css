@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+:root {
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Default Light Theme Surfaces */
+  --bg-canvas: #F8FAFC;
+  --bg-surface: #FFFFFF;
+  --bg-subtle: #F1F5F9;
+  --bg-elevated: #FFFFFF;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #64748B;
+  --border-hairline: #E2E8F0;
+  --border-strong: #CBD5E1;
+
+  /* Contextual Positive Color Pair (Default: Emerald Green) */
+  --ctx-pos: #15803D;
+  --ctx-pos-hover: #166534;
+  --ctx-pos-soft: rgba(21, 128, 61, 0.10);
+  --ctx-pos-border: rgba(21, 128, 61, 0.30);
+  --ctx-pos-text: #14532D;
+
+  /* Contextual Negative Color Pair (Default: Crimson Red) */
+  --ctx-neg: #B91C1C;
+  --ctx-neg-hover: #991B1B;
+  --ctx-neg-soft: rgba(185, 28, 28, 0.10);
+  --ctx-neg-border: rgba(185, 28, 28, 0.30);
+  --ctx-neg-text: #7F1D1D;
+}
+
+.dark {
+  --bg-canvas: #0B0F17;
+  --bg-surface: #111827;
+  --bg-subtle: #1E293B;
+  --bg-elevated: #161F30;
+  --text-primary: #F1F5F9;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --border-hairline: #1E293B;
+  --border-strong: #334155;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Contextual Button & Surface Utilities */
+.btn-ctx-pos {
+  background-color: var(--ctx-pos);
+  color: #FFFFFF;
+  border: 1px solid var(--ctx-pos-border);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn-ctx-pos:hover {
+  background-color: var(--ctx-pos-hover);
+}
+
+.btn-ctx-pos-soft {
+  background-color: var(--ctx-pos-soft);
+  color: var(--ctx-pos-text);
+  border: 1px solid var(--ctx-pos-border);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn-ctx-pos-soft:hover {
+  opacity: 0.88;
+}
+
+.btn-ctx-neg {
+  background-color: var(--ctx-neg);
+  color: #FFFFFF;
+  border: 1px solid var(--ctx-neg-border);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn-ctx-neg:hover {
+  background-color: var(--ctx-neg-hover);
+}
+
+.btn-ctx-neg-soft {
+  background-color: var(--ctx-neg-soft);
+  color: var(--ctx-neg-text);
+  border: 1px solid var(--ctx-neg-border);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn-ctx-neg-soft:hover {
+  opacity: 0.88;
+}
+
+/* Canvas dot pattern */
+.canvas-grid-pattern {
+  background-image: radial-gradient(var(--border-strong) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
