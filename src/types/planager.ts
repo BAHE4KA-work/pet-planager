@@ -145,7 +145,7 @@ export interface AiInterviewQuestion {
   userAnswer?: string;
 }
 
-export type ThemeMode = 'dark' | 'light' | 'system';
+export type ThemeMode = 'dark' | 'classic' | 'light' | 'system';
 
 export type PositivePaletteKey = 'emerald' | 'violet' | 'sapphire' | 'teal' | 'amber';
 export type NegativePaletteKey = 'crimson' | 'rose' | 'ochre' | 'slate' | 'indigo';
