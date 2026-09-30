@@ -58,7 +58,7 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
   onOpenCitationLineRange,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'proposals' | 'contradictions' | 'interview' | 'transform' | 'rag'
+    'proposals' | 'contradictions' | 'interview' | 'transform'
   >('proposals');
 
   const [loading, setLoading] = useState(false);
@@ -332,22 +332,6 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
         >
           <Wand2 className="w-3.5 h-3.5" />
           <span>Преобразование элементов</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('rag')}
-          className="py-3 border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer"
-          style={{
-            borderColor: activeTab === 'rag' ? 'var(--ctx-pos)' : 'transparent',
-            color:
-              activeTab === 'rag'
-                ? 'var(--text-primary)'
-                : 'var(--text-secondary)',
-          }}
-        >
-          <FileCode2 className="w-3.5 h-3.5" />
-          <span>Индекс .pgr и чтение по строкам ({ragIndex.length})</span>
         </button>
       </div>
 
@@ -787,56 +771,6 @@ export const AiAssistantPanel: React.FC<AiAssistantPanelProps> = ({
                   {lastTransformSummary}
                 </div>
               )}
-            </div>
-          </div>
-        )}
-
-        {/* TAB 5: RAG INDEX & LINE-RANGE FILE INSPECTOR */}
-        {activeTab === 'rag' && (
-          <div className="space-y-3 max-w-5xl">
-            <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-              Индексированные блоки файлов <code>.pgr</code>. ИИ-ассистент читает файлы точечно по диапазонам строк, не перегружая контекст:
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {ragIndex.map((chunk) => (
-                <div
-                  key={chunk.elementId}
-                  className="p-3 rounded-lg border flex flex-col justify-between gap-2"
-                  style={{
-                    backgroundColor: 'var(--bg-surface)',
-                    borderColor: 'var(--border-hairline)',
-                  }}
-                >
-                  <div className="flex items-center justify-between text-xs font-mono-tabular">
-                    <span className="font-semibold">{chunk.elementId}</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onOpenCitationLineRange(
-                          chunk.fileName,
-                          chunk.startLine,
-                          chunk.endLine,
-                          chunk.elementId
-                        )
-                      }
-                      className="underline cursor-pointer"
-                      style={{ color: 'var(--ctx-pos)' }}
-                    >
-                      {chunk.citation} (открыть строки)
-                    </button>
-                  </div>
-                  <div className="text-xs font-medium">{chunk.title}</div>
-                  <pre
-                    className="p-2 rounded text-[11px] font-mono-tabular overflow-x-auto max-h-28"
-                    style={{
-                      backgroundColor: 'var(--bg-subtle)',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
-                    {chunk.snippet}
-                  </pre>
-                </div>
-              ))}
             </div>
           </div>
         )}

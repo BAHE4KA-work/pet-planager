@@ -91,10 +91,10 @@ export function generateLocalAnalysis(
     contradictions.push({
       id: 'contra_stack_durability',
       severity: 'medium',
-      title: 'Конфликт правил: cmp_stackable и cmp_durability на cls_item',
+      title: 'Конфликт правил: cmp_stackable и cmp_durability в sys_inventory',
       description:
-        'Логика cmp_stackable запрещает слияние предметов с разной прочностью, но базовый cls_item включает оба компонента одновременно.',
-      elementIds: ['cls_item', 'cmp_durability', 'cmp_stackable'],
+        'Логика cmp_stackable запрещает слияние предметов с разной прочностью, но базовый cls_item в системе sys_inventory включает оба компонента одновременно, а процесс proc_pickup_item объединяет стеки без проверки прочности.',
+      elementIds: ['sys_inventory', 'cls_item', 'proc_pickup_item'],
       fileCitation: findCitation('cls_item'),
       resolutionHint:
         'Уточнить в proc_pickup_item проверку полной прочности перед объединением стека.',

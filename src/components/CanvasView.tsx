@@ -257,21 +257,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           ))}
         </div>
 
-        {/* Right: Zoom & Auto-Layout Controls */}
+        {/* Right: Zoom Controls */}
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={onAutoLayout}
-            className="px-2.5 py-1 rounded text-xs flex items-center gap-1.5 cursor-pointer"
-            style={{
-              backgroundColor: 'var(--bg-subtle)',
-              color: 'var(--text-primary)',
-              border: '1px solid var(--border-hairline)',
-            }}
-            title="Автоматически разложить элементы по Системам и уровням связей"
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span>Укладка</span>
-          </button>
           <div
             className="flex items-center rounded px-1 py-0.5 font-mono-tabular"
             style={{
