@@ -703,6 +703,39 @@ select option {
   background: var(--ctx-neg-soft);
 }
 
+@keyframes contextShimmer {
+  0% {
+    color: var(--ctx-pos-text);
+    border-color: var(--ctx-pos-border);
+    background: radial-gradient(circle at 25% 25%, var(--ctx-pos-soft) 0%, transparent 80%);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.18);
+  }
+  50% {
+    color: #ffffff;
+    border-color: var(--ctx-pos-hover);
+    background: radial-gradient(circle at 75% 75%, var(--ctx-pos-soft) 35%, transparent 90%);
+    box-shadow: 0 0 12px rgba(34, 197, 94, 0.42);
+  }
+  100% {
+    color: var(--ctx-pos-text);
+    border-color: var(--ctx-pos-border);
+    background: radial-gradient(circle at 25% 25%, var(--ctx-pos-soft) 0%, transparent 80%);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.18);
+  }
+}
+
+.btn-ai-shimmer {
+  animation: contextShimmer 3.2s ease-in-out infinite;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-ai-shimmer:hover {
+  transform: scale(1.06);
+  box-shadow: 0 0 15px rgba(34, 197, 94, 0.6);
+}
+
 /* Interactive Canvas in System Dark Style */
 .sys-canvas-area {
   position: relative;

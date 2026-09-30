@@ -2,9 +2,12 @@ import {
   AiContradiction,
   AiInterviewQuestion,
   AiProposalCard,
+  AiProviderConfig,
+  GitCommit,
   PlanElement,
+  UnitLibraryItem,
 } from '../types/planager';
-import { serializeFileWithRanges } from './pgrCodec';
+import { buildAndValidateGraph, serializeFileWithRanges } from './pgrCodec';
 
 export function buildRagIndex(elements: PlanElement[], files: string[]) {
   const index: {
@@ -38,6 +41,296 @@ export function buildRagIndex(elements: PlanElement[], files: string[]) {
   return index;
 }
 
+/**
+ * Dynamic, non-mocked static AST/schema verifier that inspects any .pgr graph
+ * for inheritance type mismatches, broken references, and structural conflicts.
+ */
+export function inspectGraphSchemaIssues(
+  elements: PlanElement[],
+  files: string[]
+): AiContradiction[] {
+  const rag = buildRagIndex(elements, files);
+  const findCitation = (id: string) =>
+    rag.find((r) => r.elementId === id)?.citation || `${files[0] || 'plan.pgr'}:1-10`;
+
+  const byId = new Map<string, PlanElement>();
+  elements.forEach((e) => byId.set(e.id, e));
+  const issues: AiContradiction[] = [];
+
+  // 1. Check all class inheritance chains for incompatible field dataType overrides
+  for (const el of elements) {
+    if (el.type === 'class' && el.extendsId && el.extendsId !== '-') {
+      const parentCls = byId.get(el.extendsId);
+      if (parentCls && parentCls.type === 'class') {
+        for (const childField of el.fields || []) {
+          const baseField = (parentCls.fields || []).find(
+            (f) => f.name === childField.name
+          );
+          if (baseField && baseField.dataType !== childField.dataType) {
+            const affectedInstances = elements
+              .filter(
+                (o) =>
+                  o.type === 'object' &&
+                  (o.instanceOf === parentCls.id || o.instanceOf === el.id)
+              )
+              .map((o) => o.id);
+            issues.push({
+              id: `schema_type_${parentCls.id}_${el.id}_${childField.name}`,
+              severity: 'high',
+              title: `Несовпадение типа поля ${childField.name}: ${parentCls.id} (${baseField.dataType}) и ${el.id} (${childField.dataType})`,
+              description: `В базовом классе ${parentCls.id} поле «${childField.name}» объявлено с типом ${baseField.dataType}, а в дочернем классе ${el.id} (extends: ${parentCls.id}) переопределено с типом ${childField.dataType}.`,
+              elementIds: [parentCls.id, el.id, ...affectedInstances],
+              fileCitation: findCitation(el.id),
+              resolutionHint: `Привести тип поля ${childField.name} в ${el.id} к ${baseField.dataType} или удалить дублирующее переопределение.`,
+              suggestedFix: {
+                targetElementId: el.id,
+                patch: {
+                  fields: (el.fields || []).filter(
+                    (f) => f.name !== childField.name
+                  ),
+                },
+                fixLabel: `Убрать конфликтующее переопределение ${childField.name} в ${el.id}`,
+              },
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Check graph validation warnings (broken links, cycles)
+  const { warnings } = buildAndValidateGraph(elements);
+  warnings.forEach((w, idx) => {
+    const targetEl = byId.get(w.elementId);
+    if (!targetEl) return;
+    issues.push({
+      id: `schema_warn_${w.elementId}_${idx}`,
+      severity: 'medium',
+      title: `Нарушение ссылочной целостности в ${w.elementId}`,
+      description: w.message,
+      elementIds: [w.elementId],
+      fileCitation: findCitation(w.elementId),
+      resolutionHint: `Исправить некорректную ссылку в свойствах элемента ${w.elementId}.`,
+    });
+  });
+
+  return issues;
+}
+
+export async function fetchAiAnalysis(params: {
+  elements: PlanElement[];
+  selectedIds: string[];
+  files: string[];
+  aiConfig: AiProviderConfig;
+  customGoal?: string;
+}): Promise<{
+  proposals: AiProposalCard[];
+  contradictions: AiContradiction[];
+  providerUsed: string;
+  modelUsed: string;
+  error?: string;
+}> {
+  const { elements, selectedIds, files, aiConfig, customGoal } = params;
+  const rag = buildRagIndex(elements, files);
+  const selectedElements =
+    selectedIds.length > 0
+      ? elements.filter((e) => selectedIds.includes(e.id))
+      : elements;
+
+  const response = await fetch('/api/ai/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      selectedElements,
+      allElements: elements,
+      fileSnippets: rag,
+      customGoal,
+      aiConfig,
+    }),
+  });
+
+  const payload = await response.json();
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error || `Ошибка HTTP ${response.status}`);
+  }
+
+  const schemaIssues = inspectGraphSchemaIssues(elements, files);
+  const aiContradictions: AiContradiction[] = Array.isArray(
+    payload.data?.contradictions
+  )
+    ? payload.data.contradictions
+    : [];
+
+  // Merge deterministic schema issues with AI-discovered contradictions without duplicates
+  const mergedContradictions: AiContradiction[] = [...aiContradictions];
+  for (const issue of schemaIssues) {
+    const alreadyCovered = mergedContradictions.some(
+      (c) =>
+        c.id === issue.id ||
+        (issue.elementIds.length >= 2 &&
+          issue.elementIds
+            .slice(0, 2)
+            .every((eid) => c.elementIds?.includes(eid)))
+    );
+    if (!alreadyCovered) {
+      mergedContradictions.push(issue);
+    }
+  }
+
+  return {
+    proposals: Array.isArray(payload.data?.proposals)
+      ? payload.data.proposals
+      : [],
+    contradictions: mergedContradictions,
+    providerUsed: payload.providerUsed || aiConfig.provider,
+    modelUsed:
+      payload.modelUsed ||
+      (aiConfig.provider === 'gemini'
+        ? aiConfig.geminiModel
+        : aiConfig.customModel),
+  };
+}
+
+export async function fetchAiInterview(params: {
+  elements: PlanElement[];
+  selectedIds: string[];
+  files: string[];
+  userAnswers?: { question: string; answer: string; targetElementId?: string }[];
+  aiConfig: AiProviderConfig;
+}): Promise<{
+  questions: AiInterviewQuestion[];
+}> {
+  const { elements, selectedIds, files, userAnswers, aiConfig } = params;
+  const rag = buildRagIndex(elements, files);
+  const selectedElements =
+    selectedIds.length > 0
+      ? elements.filter((e) => selectedIds.includes(e.id))
+      : elements;
+
+  const response = await fetch('/api/ai/interview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      selectedElements,
+      allElements: elements,
+      fileSnippets: rag,
+      userAnswers: userAnswers || [],
+      aiConfig,
+    }),
+  });
+
+  const payload = await response.json();
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error || `Ошибка HTTP ${response.status}`);
+  }
+
+  return {
+    questions: Array.isArray(payload.data?.questions)
+      ? payload.data.questions
+      : [],
+  };
+}
+
+export async function fetchAiApplyInterviewAnswer(params: {
+  targetElement: PlanElement;
+  question: string;
+  answer: string;
+  aiConfig: AiProviderConfig;
+}): Promise<{
+  updatedElement: Partial<PlanElement>;
+  summary: string;
+}> {
+  const response = await fetch('/api/ai/interview-answer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  const payload = await response.json();
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error || `Ошибка HTTP ${response.status}`);
+  }
+
+  return {
+    updatedElement: payload.data?.updatedElement || {},
+    summary: payload.data?.summary || 'Изменения применены к элементу',
+  };
+}
+
+export async function fetchAiTransformation(params: {
+  sourceElement: PlanElement;
+  targetPattern: 'system_pack' | 'class_hierarchy' | 'process_chain';
+  existingElements: PlanElement[];
+  aiConfig: AiProviderConfig;
+}): Promise<{
+  summary: string;
+  createdElements: PlanElement[];
+}> {
+  const { sourceElement, targetPattern, existingElements, aiConfig } = params;
+  const response = await fetch('/api/ai/transform', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sourceElement,
+      targetPattern,
+      existingElements,
+      aiConfig,
+    }),
+  });
+
+  const payload = await response.json();
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error || `Ошибка HTTP ${response.status}`);
+  }
+
+  const baseX = sourceElement.position.x + 260;
+  const baseY = sourceElement.position.y;
+  const rawCreated: any[] = Array.isArray(payload.data?.createdElements)
+    ? payload.data.createdElements
+    : [];
+
+  const createdElements: PlanElement[] = rawCreated.map((item, idx) => ({
+    id: item.id || `cls_gen_${idx + 1}`,
+    type: item.type || 'class',
+    title: item.title || item.id || 'Новый элемент',
+    fileName: item.fileName || sourceElement.fileName,
+    parent:
+      item.type === 'system'
+        ? '-'
+        : item.parent ||
+          (sourceElement.type === 'system'
+            ? sourceElement.id
+            : sourceElement.parent || '-'),
+    description: item.description || `Создано из ${sourceElement.id}`,
+    status: 'черновик',
+    mvp: item.mvp ?? sourceElement.mvp,
+    originIdeaId: sourceElement.id,
+    position: {
+      x: baseX + (idx % 2) * 260,
+      y: baseY + Math.floor(idx / 2) * 150,
+    },
+    extendsId: item.type === 'class' ? item.extendsId || '-' : undefined,
+    fields: item.type === 'class' ? item.fields || [] : undefined,
+    methods: item.type === 'class' ? item.methods || [] : undefined,
+    steps: item.type === 'process' ? item.steps || [] : undefined,
+    interfaceItems:
+      item.type === 'component' ? item.interfaceItems || [] : undefined,
+    internalLogic:
+      item.type === 'component' ? item.internalLogic || [] : undefined,
+    components: Array.isArray(item.components) ? item.components : [],
+    uses: Array.isArray(item.uses) ? item.uses : [],
+    instanceOf: item.type === 'object' ? item.instanceOf || '-' : undefined,
+    values: item.type === 'object' ? item.values || [] : undefined,
+  }));
+
+  return {
+    summary:
+      payload.data?.summary ||
+      `Элемент ${sourceElement.id} развёрнут через ИИ (${createdElements.length} новых блок.)`,
+    createdElements,
+  };
+}
+
 export function generateLocalAnalysis(
   elements: PlanElement[],
   selectedIds: string[],
@@ -46,155 +339,29 @@ export function generateLocalAnalysis(
   proposals: AiProposalCard[];
   contradictions: AiContradiction[];
 } {
-  const rag = buildRagIndex(elements, files);
-  const findCitation = (id: string) =>
-    rag.find((r) => r.elementId === id)?.citation || 'sys_inventory.pgr:1-20';
-
+  const contradictions = inspectGraphSchemaIssues(elements, files);
+  const selected = elements.filter((e) => selectedIds.includes(e.id));
   const proposals: AiProposalCard[] = [];
-  const contradictions: AiContradiction[] = [];
 
-  const clsItem = elements.find((e) => e.id === 'cls_item');
-  const clsWeapon = elements.find((e) => e.id === 'cls_weapon');
-
-  // 1. Exact contradiction from /design/knowledge-base.html:
-  // "⚠ Возможное противоречие с cls_weapon по полю weight"
-  if (clsItem && clsWeapon) {
-    const wWeapon = (clsWeapon.fields || []).find((f) => f.name === 'weight');
-    if (wWeapon && wWeapon.dataType !== 'float') {
-      contradictions.push({
-        id: 'contra_weight_type_mismatch',
-        severity: 'high',
-        title: 'Возможное противоречие с cls_weapon по полю weight',
-        description:
-          'В базовом классе cls_item поле weight имеет тип float (вес в кг), а в наследуемом классе cls_weapon (extends: cls_item) оно переопределено как int. Это приведёт к потере дробной части веса (например, у obj_sword_excalibur weight = 3.2).',
-        elementIds: ['cls_item', 'cls_weapon', 'obj_sword_excalibur'],
-        fileCitation: findCitation('cls_item'),
-        resolutionHint:
-          'Удалить дублирующее поле weight: int из cls_weapon, чтобы оно наследовалось от cls_item как float.',
-        suggestedFix: {
-          targetElementId: 'cls_weapon',
-          patch: {
-            fields: (clsWeapon.fields || []).filter((f) => f.name !== 'weight'),
-          },
-          fixLabel: 'Синхронизировать поле weight (убрать конфликт в cls_weapon)',
+  for (const el of selected) {
+    if (el.type === 'idea') {
+      proposals.push({
+        id: `prop_idea_${el.id}`,
+        category: 'rethink',
+        title: `Развернуть идею «${el.title}» в класс или компонент`,
+        rationale: `Идея ${el.id} может быть детализирована в конкретную реализацию.`,
+        targetElementId: el.id,
+        fileCitation: `${el.fileName}:1-20`,
+        suggestedElement: {
+          id: `cls_${el.id.replace('idea_', '')}`,
+          type: 'class',
+          title: `Класс ${el.title}`,
+          parent: el.parent || '-',
+          description: `Класс, созданный из идеи ${el.id}`,
         },
       });
     }
   }
-
-  // 2. Contradiction between cmp_stackable and cmp_durability on cls_item
-  if (
-    clsItem &&
-    clsItem.components?.includes('cmp_durability') &&
-    clsItem.components?.includes('cmp_stackable')
-  ) {
-    contradictions.push({
-      id: 'contra_stack_durability',
-      severity: 'medium',
-      title: 'Конфликт правил: cmp_stackable и cmp_durability в sys_inventory',
-      description:
-        'Логика cmp_stackable запрещает слияние предметов с разной прочностью, но базовый cls_item в системе sys_inventory включает оба компонента одновременно, а процесс proc_pickup_item объединяет стеки без проверки прочности.',
-      elementIds: ['sys_inventory', 'cls_item', 'proc_pickup_item'],
-      fileCitation: findCitation('cls_item'),
-      resolutionHint:
-        'Уточнить в proc_pickup_item проверку полной прочности перед объединением стека.',
-      suggestedFix: {
-        targetElementId: 'proc_pickup_item',
-        patch: {
-          steps: [
-            'Проверить лимит переносимого веса',
-            'Если есть cmp_stackable и current_durability == max_durability — найти неполный стек',
-            'Поместить предмет в слот и обновить вес',
-          ],
-        },
-        fixLabel: 'Добавить проверку прочности в proc_pickup_item',
-      },
-    });
-  }
-
-  // 1. Exact proposal from /design/knowledge-base.html:
-  // "Предложение: добавить компонент cmp_rarity"
-  if (!elements.some((e) => e.id === 'cmp_rarity')) {
-    proposals.push({
-      id: 'prop_add_cmp_rarity',
-      category: 'new_element',
-      title: 'Предложение: добавить компонент cmp_rarity',
-      rationale:
-        'Для разграничения обычных предметов (cls_item) и уникальных экземпляров вроде Экскалибура (obj_sword_excalibur) рекомендуется выделить компонент редкости cmp_rarity и подключить его к cls_item.',
-      targetElementId: 'cls_item',
-      fileCitation: findCitation('cls_item'),
-      suggestedElement: {
-        id: 'cmp_rarity',
-        type: 'component',
-        title: 'Редкость и ценность',
-        fileName: 'sys_inventory.pgr',
-        parent: 'sys_inventory',
-        mvp: true,
-        description:
-          'Определяет ранг редкости предмета и модификатор его ценности при обмене.',
-        interfaceItems: [
-          'rarity_tier: string — обычное / редкое / легендарное',
-          'value_mult: float — множитель базовой ценности',
-        ],
-        internalLogic: [
-          'Запрещает разбор легендарных предметов на обычный лом',
-        ],
-      },
-    });
-  }
-
-  proposals.push({
-    id: 'prop_repair_process',
-    category: 'balance',
-    title: 'Предложение: добавить процесс ремонта proc_repair_item',
-    rationale:
-      'В sys_inventory есть компонент износа cmp_durability, но отсутствует процесс восстановления прочности.',
-    targetElementId: 'sys_inventory',
-    fileCitation: findCitation('cmp_durability'),
-    suggestedElement: {
-      id: 'proc_repair_item',
-      type: 'process',
-      title: 'Ремонт предмета',
-      fileName: 'sys_inventory.pgr',
-      parent: 'sys_inventory',
-      mvp: true,
-      description:
-        'Восстанавливает current_durability предмета до max_durability.',
-      steps: [
-        'Проверить наличие cmp_durability и факт износа',
-        'Списать ресурсы на починку',
-        'Установить current_durability = max_durability',
-      ],
-      components: ['cmp_durability'],
-      uses: ['cls_item', 'cmp_durability'],
-    },
-  });
-
-  proposals.push({
-    id: 'prop_faction_merchant_obj',
-    category: 'polish',
-    title: 'Предложение: добавить эталонный объект obj_faction_quartermaster',
-    rationale:
-      'Позволит проверить работу cmp_reputation_bound на конкретном примере интенданта фракции.',
-    targetElementId: 'sys_factions',
-    fileCitation: findCitation('sys_factions'),
-    suggestedElement: {
-      id: 'obj_faction_quartermaster',
-      type: 'object',
-      title: 'Интендант Северного ордена',
-      fileName: 'sys_factions.pgr',
-      parent: 'sys_factions',
-      instanceOf: '-',
-      mvp: false,
-      description:
-        'Экземпляр НИП на базе компонента репутации без базового класса.',
-      components: ['cmp_reputation_bound'],
-      values: [
-        { fieldName: 'faction_id', value: '"northern_order"' },
-        { fieldName: 'min_rep', value: '50' },
-      ],
-    },
-  });
 
   return { proposals, contradictions };
 }
@@ -203,150 +370,179 @@ export function generateLocalInterviewQuestions(
   elements: PlanElement[],
   selectedIds: string[]
 ): AiInterviewQuestion[] {
-  const focus = elements.filter((e) => selectedIds.includes(e.id));
-  const targetTitle =
-    focus.length > 0 ? focus.map((f) => f.id).join(', ') : 'sys_inventory';
+  const selected = elements.filter((e) => selectedIds.includes(e.id));
+  const questions: AiInterviewQuestion[] = [];
 
-  return [
-    {
-      id: 'q_broken_item',
-      targetElementId: 'cmp_durability',
-      question: `Что происходит с предметом (${targetTitle}) при падении current_durability до 0?`,
-      weakSpotContext:
-        'В cmp_durability указана блокировка use(), но не уточнено, можно ли предмет починить или он уничтожается.',
-      quickOptions: [
-        'Предмет остаётся в инвентаре со статусом «сломан» до ремонта',
-        'Обычные предметы разрушаются, уникальные (obj_sword_excalibur) только блокируются',
-      ],
-    },
-    {
-      id: 'q_faction_leave',
-      targetElementId: 'sys_factions',
-      question:
-        'Может ли игрок состоять в нескольких фракциях одновременно при вызове proc_join_faction?',
-      weakSpotContext:
-        'В proc_join_faction проверяется отсутствие вражды, но не лимит членства.',
-      quickOptions: [
-        'Только одна основная фракция + малые гильдии',
-        'Любое число невраждебных друг другу фракций',
-      ],
-    },
-  ];
+  for (const el of selected) {
+    if (el.type === 'class') {
+      questions.push({
+        id: `q_class_${el.id}`,
+        targetElementId: el.id,
+        question: `Каковы основные методы и инварианты для класса ${el.title} (${el.id})?`,
+        weakSpotContext: `Класс: ${el.id}, родитель: ${el.parent || '-'}`,
+        quickOptions: [
+          'Добавить CRUD методы',
+          'Сделать неизменяемым объектом (Value Object)',
+          'Определить обработчик событий',
+        ],
+      });
+    } else if (el.type === 'system') {
+      questions.push({
+        id: `q_sys_${el.id}`,
+        targetElementId: el.id,
+        question: `Какие подсистемы и зависимости входят в периметр системы ${el.title}?`,
+        weakSpotContext: `Система: ${el.id}`,
+        quickOptions: ['Модульная архитектура', 'Микросервисы', 'Монолитный модуль'],
+      });
+    }
+  }
+
+  if (questions.length === 0 && elements.length > 0) {
+    const first = elements[0];
+    questions.push({
+      id: `q_general_${first.id}`,
+      targetElementId: first.id,
+      question: `Нужен ли элемент ${first.title} в первой версии (MVP)?`,
+      weakSpotContext: `Элемент: ${first.id} [${first.type}]`,
+      quickOptions: ['Да, обязательно для MVP', 'Нет, перенести в бэклог'],
+    });
+  }
+
+  return questions;
 }
 
 export function generateLocalTransformation(
-  source: PlanElement,
-  pattern: 'system_pack' | 'class_hierarchy' | 'process_chain'
+  sourceElement: PlanElement,
+  targetPattern: 'system_pack' | 'class_hierarchy' | 'process_chain'
 ): {
   summary: string;
   createdElements: PlanElement[];
 } {
-  const baseSlug = source.id.replace(/^(idea_|sys_|cls_|proc_|cmp_|obj_)/, '');
-  const fileName = source.fileName;
-  const baseX = source.position.x + 240;
-  const baseY = source.position.y;
+  const baseX = sourceElement.position.x + 240;
+  const baseY = sourceElement.position.y;
+  const baseId = sourceElement.id.replace(/^(idea|sys|cls|obj)_/, '');
 
-  if (pattern === 'system_pack') {
-    const sysId = `sys_${baseSlug}_weather`;
-    const cmpId = `cmp_${baseSlug}_corrosion`;
-    const clsId = `cls_${baseSlug}_zone`;
+  if (targetPattern === 'class_hierarchy') {
+    const baseClass: PlanElement = {
+      id: `cls_${baseId}_base`,
+      type: 'class',
+      title: `${sourceElement.title} (Базовый)`,
+      fileName: sourceElement.fileName,
+      parent: sourceElement.parent || '-',
+      description: `Базовый класс из идеи ${sourceElement.id}`,
+      status: 'черновик',
+      mvp: sourceElement.mvp,
+      originIdeaId: sourceElement.id,
+      position: { x: baseX, y: baseY },
+      fields: [{ name: 'id', dataType: 'string', description: 'UID' }],
+      methods: [{ visibility: '+', signature: 'init(): void', description: 'Инициализация' }],
+    };
     return {
-      summary: `Элемент «${source.id}» развёрнут в Систему (${sysId}), Компонент (${cmpId}) и Класс (${clsId}) с сохранением связи с источником.`,
-      createdElements: [
-        {
-          id: sysId,
-          type: 'system',
-          title: `Система: ${source.title.slice(0, 28)}`,
-          fileName,
-          parent: '-',
-          description: `Развёрнуто из ${source.id}: ${source.description}`,
-          status: 'черновик',
-          mvp: source.mvp,
-          originIdeaId: source.id,
-          position: { x: baseX, y: baseY },
-        },
-        {
-          id: cmpId,
-          type: 'component',
-          title: `Коррозия от среды`,
-          fileName,
-          parent: sysId,
-          description: `Компонент ускоренного износа (источник: ${source.id}).`,
-          status: 'черновик',
-          mvp: source.mvp,
-          originIdeaId: source.id,
-          position: { x: baseX + 240, y: baseY },
-          interfaceItems: ['corrosion_rate: float — множитель износа'],
-          internalLogic: ['Увеличивает расход прочности в сырую погоду'],
-        },
-        {
-          id: clsId,
-          type: 'class',
-          title: `Погодная зона`,
-          fileName,
-          parent: sysId,
-          extendsId: '-',
-          description: `Класс зоны с повышенной влажностью (источник: ${source.id}).`,
-          status: 'черновик',
-          mvp: source.mvp,
-          originIdeaId: source.id,
-          position: { x: baseX + 240, y: baseY + 140 },
-          fields: [
-            { name: 'humidity', dataType: 'float', description: 'влажность 0..1' },
-          ],
-          methods: [
-            { visibility: '+', signature: 'tick_weather()', description: 'применить эффект' },
-          ],
-          components: [cmpId],
-          uses: [],
-        },
-      ],
+      summary: `Сформирована иерархия классов для ${sourceElement.id}`,
+      createdElements: [baseClass],
     };
   }
 
-  const parentSys =
-    source.type === 'system'
-      ? source.id
-      : source.parent !== '-'
-      ? source.parent
-      : 'sys_inventory';
-  const clsId = `cls_${baseSlug}_model`;
-  const objId = `obj_${baseSlug}_sample`;
-  return {
-    summary: `Из «${source.id}» созданы Класс (${clsId}) и Объект (${objId}).`,
-    createdElements: [
-      {
-        id: clsId,
-        type: 'class',
-        title: `Класс (${source.id})`,
-        fileName,
-        parent: parentSys,
-        extendsId: '-',
-        description: source.description,
-        status: 'черновик',
-        mvp: true,
-        originIdeaId: source.id,
-        position: { x: baseX, y: baseY },
-        fields: [{ name: 'power', dataType: 'float', description: 'мощность' }],
-        methods: [{ visibility: '+', signature: 'apply()', description: 'применить' }],
-        components: [],
-        uses: [],
-      },
-      {
-        id: objId,
-        type: 'object',
-        title: `Экземпляр (${source.id})`,
-        fileName,
-        parent: parentSys,
-        instanceOf: clsId,
-        description: `Конкретный пример для ${clsId}.`,
-        status: 'черновик',
-        mvp: true,
-        originIdeaId: source.id,
-        position: { x: baseX + 240, y: baseY },
-        components: [],
-        values: [{ fieldName: 'power', value: '10.0' }],
-      },
-    ],
+  const sysEl: PlanElement = {
+    id: `sys_${baseId}`,
+    type: 'system',
+    title: `Система ${sourceElement.title}`,
+    fileName: sourceElement.fileName,
+    parent: '-',
+    description: `Система, развернутая из идеи ${sourceElement.id}`,
+    status: 'черновик',
+    mvp: sourceElement.mvp,
+    originIdeaId: sourceElement.id,
+    position: { x: baseX, y: baseY },
   };
+
+  return {
+    summary: `Развернут системный пакет для ${sourceElement.id}`,
+    createdElements: [sysEl],
+  };
+}
+
+export async function testAiConnection(
+  aiConfig: AiProviderConfig
+): Promise<{
+  ok: boolean;
+  latencyMs?: number;
+  providerUsed?: string;
+  modelUsed?: string;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/ai/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aiConfig }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      return {
+        ok: false,
+        error: data.error || `Ошибка HTTP ${res.status}`,
+      };
+    }
+    return data;
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message || 'Ошибка соединения с сервером',
+    };
+  }
+}
+
+export interface WorkspaceStatePayload {
+  files: string[];
+  elements: PlanElement[];
+  userPositionedNodeIds: string[];
+  unitLibrary: UnitLibraryItem[];
+  commits: GitCommit[];
+}
+
+export async function loadWorkspaceFromServer(): Promise<WorkspaceStatePayload | null> {
+  try {
+    const res = await fetch('/api/workspace');
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function syncWorkspaceToServer(
+  payload: WorkspaceStatePayload
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/workspace/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function createServerCommit(params: {
+  message: string;
+  author?: string;
+  files: string[];
+  elements: PlanElement[];
+}): Promise<GitCommit | null> {
+  try {
+    const res = await fetch('/api/workspace/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.commit || null;
+  } catch {
+    return null;
+  }
 }

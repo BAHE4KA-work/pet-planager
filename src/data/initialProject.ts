@@ -136,239 +136,341 @@ export const NEGATIVE_PALETTES: Record<
 };
 
 export const INITIAL_FILES = [
-  'sys_inventory.pgr',
-  'sys_factions.pgr',
-  'idea_backlog.pgr',
+  'sys_planager_core.pgr',
+  'sys_canvas_engine.pgr',
+  'sys_ai_assistant.pgr',
 ];
 
 export const INITIAL_ELEMENTS: PlanElement[] = [
-  // ================= FILE 1: sys_inventory.pgr (7 elements) =================
+  // ================= FILE 1: sys_planager_core.pgr =================
   {
-    id: 'sys_inventory',
+    id: 'sys_planager_core',
     type: 'system',
-    title: 'Система инвентаря',
-    fileName: 'sys_inventory.pgr',
+    title: 'PLANAGER Архитектура Платформы',
+    fileName: 'sys_planager_core.pgr',
     parent: '-',
     description:
-      'Сборник правил хранения, веса, стекирования и износа предметов персонажа и контейнеров.',
+      'Главный управляющий контур платформы PLANAGER, координирующий графический Canvas, двусторонний PGR-кодек, локальное Git-версионирование и ИИ-ассистента.',
     status: 'черновик',
     mvp: true,
     position: { x: 40, y: 40 },
   },
   {
-    id: 'cls_item',
+    id: 'cls_kb_editor',
     type: 'class',
-    title: 'Предмет',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
+    title: 'Редактор Базы Знаний',
+    fileName: 'sys_planager_core.pgr',
+    parent: 'sys_planager_core',
     extendsId: '-',
     description:
-      'Базовый объект инвентаря: любая вещь, которую можно подобрать, использовать или сложить в стек.',
+      'Управляющий класс для редактирования DSL-кода архитектуры в структурированном виде и в режиме сырого PGR-кода.',
     status: 'черновик',
     mvp: true,
     position: { x: 280, y: 40 },
     fields: [
-      { name: 'name', dataType: 'string', description: 'отображаемое имя' },
-      { name: 'weight', dataType: 'float', description: 'вес в кг' },
+      { name: 'activeFile', dataType: 'string', description: 'имя текущего открытого файла .pgr' },
+      { name: 'editorMode', dataType: 'string', description: 'режим работы (structured или raw_pgr)' },
+      { name: 'cursorLine', dataType: 'int', description: 'позиция курсора в редакторе' },
     ],
     methods: [
-      { visibility: '+', signature: 'use()', description: 'публичный, применить предмет' },
-      { visibility: '-', signature: 'validate()', description: 'приватный, проверка целостности' },
+      { visibility: '+', signature: 'parseContent(content)', description: 'двухэтапный парсинг PGR синтаксиса' },
+      { visibility: '+', signature: 'serializeElements(elements)', description: 'генерация канонического текста .pgr' },
+      { visibility: '-', signature: 'validateAst(ast)', description: 'проверка ссылочной целостности графа' },
     ],
-    components: ['cmp_durability', 'cmp_stackable'],
-    uses: ['proc_pickup_item'],
+    components: ['cmp_pgr_parser', 'cmp_ast_validator'],
+    uses: ['proc_save_pgr_file'],
   },
   {
-    id: 'obj_sword_excalibur',
-    type: 'object',
-    title: 'Меч Экскалибур',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
-    instanceOf: 'cls_item',
+    id: 'cmp_pgr_parser',
+    type: 'component',
+    title: 'Парсер PGR Синтаксиса',
+    fileName: 'sys_planager_core.pgr',
+    parent: 'sys_planager_core',
     description:
-      'Эталонный экземпляр уникального оружия для проверки переопределения полей веса и прочности.',
+      'Высокоскоростной текстовый кодек для синтаксиса .pgr с поддержкой регулярных выражений и блочной разметки.',
     status: 'черновик',
     mvp: true,
     position: { x: 540, y: 40 },
-    components: ['cmp_durability'],
-    values: [
-      { fieldName: 'name', value: '"Экскалибур"' },
-      { fieldName: 'weight', value: '3.2' },
-      { fieldName: 'current_durability', value: '100' },
-      { fieldName: 'max_durability', value: '100' },
+    interfaceItems: [
+      'serializeElementToPgr(el) — преобразование элемента в текстовый блок',
+      'parsePgrFileContent(text) — парсинг файла в набор элементов',
+    ],
+    internalLogic: [
+      'Поддерживает заголовки блоков (## Тип: Название), ключи id, parent, extends, instance_of и списки полей/методов',
     ],
   },
   {
-    id: 'cmp_durability',
+    id: 'cmp_ast_validator',
     type: 'component',
-    title: 'Износостойкость',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
+    title: 'Валидатор Графа AST',
+    fileName: 'sys_planager_core.pgr',
+    parent: 'sys_planager_core',
     description:
-      'Свойство объекта, описывающее запас прочности и деградацию при каждом применении.',
+      'Модуль проверки связей и ссылочной целостности графа элементов.',
     status: 'черновик',
     mvp: true,
     position: { x: 280, y: 180 },
     interfaceItems: [
-      'current_durability: int — текущая прочность',
-      'max_durability: int — предел прочности',
-      'degrade(amount) — снизить прочность',
+      'buildAndValidateGraph(elements) — построение ребер графа',
+      'checkContradictions(elements) — выявление логических конфликтов',
     ],
     internalLogic: [
-      'При падении current_durability до 0 блокирует основной метод use()',
+      'Проверяет существование родительских узлов и классов экземпляров',
     ],
   },
   {
-    id: 'cmp_stackable',
-    type: 'component',
-    title: 'Стекируемость',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
+    id: 'proc_save_pgr_file',
+    type: 'process',
+    title: 'Сохранение PGR Файла',
+    fileName: 'sys_planager_core.pgr',
+    parent: 'sys_planager_core',
     description:
-      'Позволяет складывать одинаковые экземпляры в одну ячейку инвентаря до лимита.',
+      'Последовательность шагов при записи изменений архитектурного элемента в файл .pgr.',
     status: 'черновик',
     mvp: true,
     position: { x: 540, y: 180 },
-    interfaceItems: [
-      'stack_count: int — количество в стеке',
-      'stack_limit: int — максимум в слоте',
+    steps: [
+      'Сериализовать текущее дерево элементов в канонический синтаксис .pgr',
+      'Рассчитать диапазон измененных строк',
+      'Обновить виртуальный снимок в файловой системе',
+      'Инкрементировать счётчик незафиксированных изменений Git',
     ],
-    internalLogic: [
-      'Запрещает слияние предметов с разной прочностью',
-    ],
+    components: ['cmp_pgr_parser'],
+    uses: ['cls_kb_editor'],
+  },
+
+  // ================= FILE 2: sys_canvas_engine.pgr =================
+  {
+    id: 'sys_canvas_engine',
+    type: 'system',
+    title: 'Движок Графического Холста',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: '-',
+    description:
+      'Интерактивная двухмерная графическая подсистема для визуализации графа компонентов, связей и конфликтов на SVG-холсте.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 40, y: 320 },
   },
   {
-    id: 'proc_pickup_item',
-    type: 'process',
-    title: 'Подбор предмета',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
+    id: 'cls_canvas_controller',
+    type: 'class',
+    title: 'Контроллер Холста',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: 'sys_canvas_engine',
+    extendsId: '-',
     description:
-      'Последовательность действий при перемещении предмета из мира в инвентарь.',
+      'Главный класс управления панорамированием, масштабированием и интерактивными событиями Canvas.',
     status: 'черновик',
     mvp: true,
     position: { x: 280, y: 320 },
-    steps: [
-      'Проверить лимит переносимого веса',
-      'Если есть cmp_stackable — найти неполный стек',
-      'Поместить предмет в слот и обновить вес',
+    fields: [
+      { name: 'zoom', dataType: 'float', description: 'текущий уровень масштабирования (40%-200%)' },
+      { name: 'panX', dataType: 'float', description: 'смещение по оси X' },
+      { name: 'panY', dataType: 'float', description: 'смещение по оси Y' },
     ],
-    components: ['cmp_stackable'],
-    uses: ['cls_item', 'cmp_durability'],
+    methods: [
+      { visibility: '+', signature: 'handleWheelZoom(delta, cursor)', description: 'масштабирование с привязкой к курсору' },
+      { visibility: '+', signature: 'handlePan(dx, dy)', description: 'перемещение видимой области' },
+      { visibility: '+', signature: 'toggleRelationVisibility(relType)', description: 'переключение видимости типов связей' },
+    ],
+    components: ['cmp_grid_alignment', 'cmp_multi_select'],
+    uses: ['proc_drag_node'],
   },
   {
-    id: 'cls_weapon',
-    type: 'class',
-    title: 'Оружие ближнего боя',
-    fileName: 'sys_inventory.pgr',
-    parent: 'sys_inventory',
-    extendsId: 'cls_item',
+    id: 'obj_primary_canvas',
+    type: 'object',
+    title: 'Эталонный Холст Проекта',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: 'sys_canvas_engine',
+    instanceOf: 'cls_canvas_controller',
     description:
-      'Наследник класса Предмет со специализированным расчётом физического урона.',
+      'Экземпляр холста по умолчанию с предустановленным масштабом 100% и сеткой прилипания.',
     status: 'черновик',
     mvp: true,
     position: { x: 540, y: 320 },
-    fields: [
-      { name: 'damage', dataType: 'int', description: 'базовый урон' },
-      { name: 'weight', dataType: 'int', description: 'переопределённый вес' },
+    values: [
+      { fieldName: 'zoom', value: '100' },
+      { fieldName: 'panX', value: '20' },
+      { fieldName: 'panY', value: '20' },
     ],
-    methods: [
-      { visibility: '+', signature: 'attack(target)', description: 'атаковать цель' },
-    ],
-    components: ['cmp_durability'],
-    uses: [],
-  },
-
-  // ================= FILE 2: sys_factions.pgr (3 elements) =================
-  {
-    id: 'sys_factions',
-    type: 'system',
-    title: 'Система фракций',
-    fileName: 'sys_factions.pgr',
-    parent: '-',
-    description:
-      'Правила взаимоотношений с группировками, рангов репутации и доступа к гильдиям.',
-    status: 'черновик',
-    mvp: false,
-    position: { x: 40, y: 460 },
   },
   {
-    id: 'proc_join_faction',
-    type: 'process',
-    title: 'Вступление во фракцию',
-    fileName: 'sys_factions.pgr',
-    parent: 'sys_factions',
-    description:
-      'Процесс проверки репутации, принесения присяги и выдачи фракционного знака.',
-    status: 'черновик',
-    mvp: false,
-    position: { x: 280, y: 460 },
-    steps: [
-      'Проверить отсутствие вражды с союзными фракциями',
-      'Выдать стартовый ранг через cmp_reputation_bound',
-      'Передать фракционный предмет через proc_pickup_item',
-    ],
-    components: ['cmp_reputation_bound'],
-    uses: ['sys_factions', 'proc_pickup_item'],
-  },
-  {
-    id: 'cmp_reputation_bound',
+    id: 'cmp_grid_alignment',
     type: 'component',
-    title: 'Привязка к репутации',
-    fileName: 'sys_factions.pgr',
-    parent: 'sys_factions',
+    title: 'Прилипание к Сетке и Направляющие',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: 'sys_canvas_engine',
     description:
-      'Определяет порог отношений с фракцией для использования предмета или диалога.',
+      'Модуль выравнивания элементов по сетке и динамическим осям с порогом срабатывания 12px.',
     status: 'черновик',
-    mvp: false,
-    position: { x: 540, y: 460 },
+    mvp: true,
+    position: { x: 280, y: 460 },
     interfaceItems: [
-      'faction_id: string — код фракции',
-      'min_rep: int — минимальный порог репутации',
+      'snapThreshold: int — порог захвата магнитной направляющей',
+      'alignmentGuides: object — активные горизонтальные и вертикальные оси',
     ],
     internalLogic: [
-      'Блокирует доступ при падении репутации ниже min_rep',
+      'Рисует пунктирные индикаторы выравнивания при перемещении узла относительно соседей',
     ],
   },
-
-  // ================= FILE 3: idea_backlog.pgr (2 elements) =================
   {
-    id: 'idea_backlog',
-    type: 'idea',
-    title: 'Мысль на будущее: Погодная коррозия снаряжения',
-    fileName: 'idea_backlog.pgr',
-    parent: '-',
+    id: 'cmp_multi_select',
+    type: 'component',
+    title: 'Мультивыделение и ИИ-Контекст',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: 'sys_canvas_engine',
     description:
-      'Отдельно стоящая идея: во время дождя металлические предметы без ножен быстрее теряют прочность. В будущем может вырасти в Систему погоды.',
+      'Система группового выбора элементов через Ctrl/Cmd + ЛКМ для формирования изолированного контекста для ИИ.',
     status: 'черновик',
-    mvp: false,
-    position: { x: 40, y: 320 },
-    notes: [],
+    mvp: true,
+    position: { x: 540, y: 460 },
+    interfaceItems: [
+      'selectedIds: string[] — массив идентификаторов выделенных узлов',
+      'toggleNodeSelection(id) — переключение выделения узла',
+    ],
+    internalLogic: [
+      'Передаёт список выбранных ID в ИИ-ассистент как приоритетный контекст анализа',
+    ],
   },
   {
-    id: 'idea_grid_tetris',
-    type: 'idea',
-    title: 'Отклонённый вариант: Тетрис-сетка инвентаря WxH',
-    fileName: 'idea_backlog.pgr',
+    id: 'proc_drag_node',
+    type: 'process',
+    title: 'Перемещение Узла Графа',
+    fileName: 'sys_canvas_engine.pgr',
+    parent: 'sys_canvas_engine',
+    description:
+      'Алгоритм перемещения одиночных элементов или выделенных групп по Canvas с фиксацией истории Ctrl+Z.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 280, y: 600 },
+    steps: [
+      'Зафиксировать стартовые позиции элементов выделенной группы',
+      'Рассчитать смещение курсора с учётом текущего масштаба CanvasZoom',
+      'Вычислить координаты с прилипанием к сетке',
+      'Обновить координаты и записать шаг в исторический стек MoveHistory',
+    ],
+    components: ['cmp_grid_alignment', 'cmp_multi_select'],
+    uses: ['cls_canvas_controller'],
+  },
+
+  // ================= FILE 3: sys_ai_assistant.pgr =================
+  {
+    id: 'sys_ai_assistant',
+    type: 'system',
+    title: 'ИИ-Ассистент Архитектора',
+    fileName: 'sys_ai_assistant.pgr',
     parent: '-',
     description:
-      'Двумерная сетка ячеек с ручным вращением предметов при укладке.',
+      'Многоагентный ИИ-сервис платформы PLANAGER для анализа противоречий, генерации предложений, проведения интервью и контроля лимитов API.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 40, y: 600 },
+  },
+  {
+    id: 'cls_ai_manager',
+    type: 'class',
+    title: 'Менеджер ИИ-Модулей',
+    fileName: 'sys_ai_assistant.pgr',
+    parent: 'sys_ai_assistant',
+    extendsId: '-',
+    description:
+      'Центральный класс взаимодействия с внешними нейросетевыми моделями и оркестрации специализированных попапов.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 540, y: 600 },
+    fields: [
+      { name: 'apiEndpoint', dataType: 'string', description: 'URL прокси или прямого эндпоинта LLM' },
+      { name: 'apiKey', dataType: 'string', description: 'зашифрованный API ключ' },
+      { name: 'isAiEnabled', dataType: 'bool', description: 'флаг активности ИИ-функций' },
+    ],
+    methods: [
+      { visibility: '+', signature: 'scanContradictions(elements)', description: 'поиск логических конфликтов в графе' },
+      { visibility: '+', signature: 'generateProposals(context)', description: 'формирование архитектурных рекомендаций' },
+      { visibility: '+', signature: 'transformElement(sourceId, pattern)', description: 'разворачивание элемента в многоуровневый каркас' },
+    ],
+    components: ['cmp_rate_limiter', 'cmp_contradiction_detector'],
+    uses: ['proc_ai_request_cycle'],
+  },
+  {
+    id: 'cmp_rate_limiter',
+    type: 'component',
+    title: 'Монитор Искусственных Лимитов',
+    fileName: 'sys_ai_assistant.pgr',
+    parent: 'sys_ai_assistant',
+    description:
+      'Подсистема контроля расхода ресурсов API по категориям RPM, RPD, TPM и TT.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 280, y: 740 },
+    interfaceItems: [
+      'limits: { rpm, rpd, tpm, tt } — искусственные пороги ограничения',
+      'currentUsage: { rpm, rpd, tpm, tt } — счетчик текущего расхода',
+      'resetTotalTokens() — сброс накопительного счётчика токенов TT',
+    ],
+    internalLogic: [
+      'Блокирует отправку запросов при превышении любого из порогов и ведёт почасовой график потребления',
+    ],
+  },
+  {
+    id: 'cmp_contradiction_detector',
+    type: 'component',
+    title: 'Детектор Противоречий',
+    fileName: 'sys_ai_assistant.pgr',
+    parent: 'sys_ai_assistant',
+    description:
+      'Алгоритмический и нейросетевой сканер несоответствий типов, дубликатов и циклических зависимостей.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 540, y: 740 },
+    interfaceItems: [
+      'contradictions: AiContradiction[] — список обнаруженных конфликтов',
+      'applyFix(fixPatch) — автоматическое применение патча исправления',
+    ],
+    internalLogic: [
+      'Подсвечивает конфликтные ребра и узлы на Canvas красным цветом с возможностью разобрать конфликт в 1 клик',
+    ],
+  },
+  {
+    id: 'proc_ai_request_cycle',
+    type: 'process',
+    title: 'Цикл Выполнения Запроса ИИ',
+    fileName: 'sys_ai_assistant.pgr',
+    parent: 'sys_ai_assistant',
+    description:
+      'Полная последовательность обработки вызова к ИИ-ассистенту от генерации промпта до записи в журнал.',
+    status: 'черновик',
+    mvp: true,
+    position: { x: 280, y: 880 },
+    steps: [
+      'Проверить искусственные лимиты RPM/RPD/TPM/TT через cmp_rate_limiter',
+      'Сформировать системный промпт с учётом выделенного контекста элементов',
+      'Отправить HTTP-запрос к эндпоинту модели',
+      'Зафиксировать расход токенов, latency и статус в таблице истории использования',
+    ],
+    components: ['cmp_rate_limiter', 'cmp_contradiction_detector'],
+    uses: ['cls_ai_manager'],
+  },
+  {
+    id: 'idea_local_wasm_llm',
+    type: 'idea',
+    title: 'Локальная LLM в WebAssembly',
+    fileName: 'sys_ai_assistant.pgr',
+    parent: 'sys_ai_assistant',
+    description:
+      'Запуск лёгкой локальной модели непосредственно в браузере через WebAssembly/WebGPU для полной приватности кода.',
     status: 'черновик',
     mvp: false,
-    position: { x: 40, y: 180 },
-    notes: ['sys_inventory', 'cls_item'],
-    altTo: 'sys_inventory',
-    altReason:
-      'Отказались в пользу списка с весом и стеками ради минимизации лишних действий игрока.',
+    position: { x: 540, y: 880 },
   },
 ];
 
-// 7 units in library matching /design/library.html ("Юнитов в библиотеке: 7")
+// Initial reusable architecture templates persisted in workspace/workspace.json
 export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   {
     unitId: 'unit_sys_inventory',
-    category: '3 класса, 4 компонента',
-    savedAt: 'Используется в 3 проектах',
+    category: 'Система · базовый контур хранения',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'sys_inventory_tpl',
       type: 'system',
@@ -381,8 +483,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_sys_dialogue',
-    category: '2 процесса, 1 компонент',
-    savedAt: 'Используется в 2 проектах',
+    category: 'Система · диалоги и проверки',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'sys_dialogue_tree',
       type: 'system',
@@ -395,8 +497,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_cmp_durability',
-    category: 'Используется в 2 проектах',
-    savedAt: 'Базовый компонент',
+    category: '2 интерфейса, 1 правило',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'cmp_durability',
       type: 'component',
@@ -414,8 +516,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_cmp_rarity',
-    category: '1 интерфейс, 2 правила',
-    savedAt: 'Используется в 4 проектах',
+    category: '1 интерфейс, 1 правило',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'cmp_rarity',
       type: 'component',
@@ -430,8 +532,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_cls_container',
-    category: '2 поля, 2 метода',
-    savedAt: 'Используется в 2 проектах',
+    category: '2 поля, 1 метод, 1 компонент',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'cls_container',
       type: 'class',
@@ -454,8 +556,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_proc_craft',
-    category: '4 шага процесса',
-    savedAt: 'Используется в 1 проекте',
+    category: '3 шага процесса, 1 компонент',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'proc_craft_item',
       type: 'process',
@@ -475,8 +577,8 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
   },
   {
     unitId: 'unit_proc_trade',
-    category: '3 шага процесса',
-    savedAt: 'Используется в 2 проектах',
+    category: '3 шага процесса, 1 компонент',
+    savedAt: 'Базовый шаблон .pgr',
     element: {
       id: 'proc_trade_barter',
       type: 'process',
@@ -495,6 +597,56 @@ export const INITIAL_UNIT_LIBRARY: UnitLibraryItem[] = [
     },
   },
 ];
+
+export function describeUnitStructure(
+  el: Omit<PlanElement, 'fileName' | 'position'>,
+  projectElements: PlanElement[]
+): { structureLabel: string; usageCount: number } {
+  const parts: string[] = [];
+  if (el.fields && el.fields.length > 0) {
+    parts.push(`${el.fields.length} пол.`);
+  }
+  if (el.methods && el.methods.length > 0) {
+    parts.push(`${el.methods.length} мет.`);
+  }
+  if (el.steps && el.steps.length > 0) {
+    parts.push(`${el.steps.length} шаг.`);
+  }
+  if (el.interfaceItems && el.interfaceItems.length > 0) {
+    parts.push(`${el.interfaceItems.length} интерф.`);
+  }
+  if (el.internalLogic && el.internalLogic.length > 0) {
+    parts.push(`${el.internalLogic.length} прав.`);
+  }
+  if (el.components && el.components.length > 0) {
+    parts.push(`${el.components.length} комп.`);
+  }
+  if (el.values && el.values.length > 0) {
+    parts.push(`${el.values.length} знач.`);
+  }
+
+  const baseId = el.id.replace(/_tpl$/, '');
+  const usageCount = projectElements.filter(
+    (pe) =>
+      pe.id === el.id ||
+      pe.id === baseId ||
+      pe.parent === el.id ||
+      pe.parent === baseId ||
+      pe.extendsId === el.id ||
+      pe.extendsId === baseId ||
+      pe.instanceOf === el.id ||
+      pe.instanceOf === baseId ||
+      (pe.components || []).includes(el.id) ||
+      (pe.components || []).includes(baseId) ||
+      (pe.uses || []).includes(el.id) ||
+      (pe.uses || []).includes(baseId)
+  ).length;
+
+  return {
+    structureLabel: parts.length > 0 ? parts.join(', ') : el.mvp ? 'MVP-элемент' : 'Базовый блок',
+    usageCount,
+  };
+}
 
 export const I18N_DICTIONARY = {
   ru: {

@@ -1,20 +1,45 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  ArrowLeft,
+  Activity,
+  BarChart2,
   Blocks,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
+  Clipboard,
+  Clock,
+  Copy,
+  CopyPlus,
   Diamond,
+  Edit2,
+  FilePlus,
+  FileText,
   Focus,
+  Folder,
+  FolderPlus,
+  Funnel,
+  Gauge,
   Group,
   Lightbulb,
+  Link,
   Maximize2,
+  MessageSquare,
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Plus,
   RotateCcw,
+  Scissors,
+  Sparkles,
+  Star,
+  StarOff,
+  Trash2,
   Workflow,
+  Zap,
 } from 'lucide-react';
 import {
   AiContradiction,
@@ -635,12 +660,74 @@ function applyCanvasAutoLayout(
   });
 }
 
+type KbContextMenuTarget =
+  | { type: 'file'; fileName: string }
+  | { type: 'element'; elementId: string; fileName: string }
+  | { type: 'folder'; folderName: string }
+  | { type: 'empty' };
+
+interface KbContextMenuState {
+  x: number;
+  y: number;
+  target: KbContextMenuTarget;
+}
+
+interface KbClipboardItem {
+  mode: 'cut' | 'copy';
+  type: 'file' | 'element';
+  id: string;
+  sourceFileName?: string;
+}
+
+interface RenameModalState {
+  isOpen: boolean;
+  type: 'file' | 'element';
+  id: string;
+  sourceFileName?: string;
+  currentName: string;
+  newName: string;
+}
+
+interface NewResourceModalState {
+  isOpen: boolean;
+  type: 'file' | 'folder';
+  parentFolder?: string;
+  name: string;
+}
+
 export function App() {
   const [activeTab, setActiveTab] = useState<PrimaryTab>('kb');
   const [leftPanelOpen, setLeftPanelOpen] = useState<boolean>(true);
   const [rightPanelOpen, setRightPanelOpen] = useState<boolean>(true);
 
+  // Context Menu & Explorer Clipboard & Starred state
+  const [kbContextMenu, setKbContextMenu] =
+    useState<KbContextMenuState | null>(null);
+  const [kbSubmenuOpen, setKbSubmenuOpen] = useState<boolean>(false);
+  const [kbClipboard, setKbClipboard] = useState<KbClipboardItem | null>(null);
+  const [starredItems, setStarredItems] = useState<Set<string>>(
+    () => new Set(['cls_item', 'sys_inventory.pgr'])
+  );
+  const [renameModal, setRenameModal] = useState<RenameModalState | null>(null);
+  const [newResourceModal, setNewResourceModal] =
+    useState<NewResourceModalState | null>(null);
+  const [deleteFileConfirm, setDeleteFileConfirm] = useState<string | null>(
+    null
+  );
+
   // Project files & elements (immediately initialized in graph-clustered auto-layout)
+  const [projectRootFolder, setProjectRootFolder] =
+    useState<string>('example');
+  const [customFolders, setCustomFolders] = useState<string[]>([]);
+  const [collapsedFolders, setCollapsedFolders] = useState<
+    Record<string, boolean>
+  >({});
+  const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>(
+    {}
+  );
+  const [isCreatingFolder, setIsCreatingFolder] = useState<boolean>(false);
+  const [newFolderName, setNewFolderName] = useState<string>('');
+
   const [files, setFiles] = useState<string[]>(INITIAL_FILES);
   const [elements, setElements] = useState<PlanElement[]>(() =>
     applyCanvasAutoLayout(INITIAL_ELEMENTS, new Set())
@@ -650,8 +737,8 @@ export function App() {
   >(() => new Set());
   const userPositionedNodeIdsRef = useRef<Set<string>>(userPositionedNodeIds);
   userPositionedNodeIdsRef.current = userPositionedNodeIds;
-  const [activeFile, setActiveFile] = useState<string>('sys_inventory.pgr');
-  const [selectedId, setSelectedId] = useState<string | null>('cls_item');
+  const [activeFile, setActiveFile] = useState<string>('sys_planager_core.pgr');
+  const [selectedId, setSelectedId] = useState<string | null>('cls_kb_editor');
   const selectedIdRef = useRef<string | null>(selectedId);
   selectedIdRef.current = selectedId;
 
@@ -671,6 +758,8 @@ export function App() {
   const [kbSearch, setKbSearch] = useState<string>('');
   const [kbTypeFilter, setKbTypeFilter] = useState<ElementType | 'all'>('all');
   const [kbMvpFilter, setKbMvpFilter] = useState<'all' | 'mvp' | 'later'>('all');
+  const [isKbFilterOpen, setIsKbFilterOpen] = useState<boolean>(false);
+  const filterPopoverRef = useRef<HTMLDivElement>(null);
 
   // Canvas state (with pan, wheel zoom, and non-sticking node drag)
   const [canvasZoom, setCanvasZoom] = useState<number>(100);
@@ -860,6 +949,30 @@ export function App() {
     };
   }, []);
 
+  // Close KB filter popup on outside click or Escape
+  useEffect(() => {
+    if (!isKbFilterOpen) return;
+    const handleDown = (e: MouseEvent) => {
+      if (
+        filterPopoverRef.current &&
+        !filterPopoverRef.current.contains(e.target as Node)
+      ) {
+        setIsKbFilterOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsKbFilterOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleDown);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handleDown);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [isKbFilterOpen]);
+
   // Non-passive wheel listener on Mini Graph so sidebar vertical scroll never triggers while cursor is over the graph
   useEffect(() => {
     const el = miniGraphRef.current;
@@ -1010,6 +1123,143 @@ export function App() {
     'https://api.openai.com/v1'
   );
   const [aiEnabled, setAiEnabled] = useState<boolean>(true);
+  const [aiApiKey, setAiApiKey] = useState<string>('sk-proj-****...8f9a');
+  const [aiLimits, setAiLimits] = useState<{
+    rpm: number;
+    rpd: number;
+    tpm: number;
+    tt: number;
+  }>({
+    rpm: 60,
+    rpd: 1000,
+    tpm: 90000,
+    tt: 500000,
+  });
+
+  const [aiUsage, setAiUsage] = useState<{
+    rpm: number;
+    rpd: number;
+    tpm: number;
+    tt: number;
+  }>({
+    rpm: 14,
+    rpd: 342,
+    tpm: 28400,
+    tt: 184200,
+  });
+
+  const [aiUsageHistory, setAiUsageHistory] = useState<
+    {
+      id: string;
+      timestamp: string;
+      action: string;
+      model: string;
+      tokensPrompt: number;
+      tokensCompletion: number;
+      totalTokens: number;
+      status: '200 OK' | '429 Rate Limit' | '500 Error';
+      latencyMs: number;
+    }[]
+  >([
+    {
+      id: 'req_108',
+      timestamp: '17:42:10',
+      action: 'Анализ противоречий .pgr',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 1420,
+      tokensCompletion: 380,
+      totalTokens: 1800,
+      status: '200 OK',
+      latencyMs: 340,
+    },
+    {
+      id: 'req_107',
+      timestamp: '17:35:04',
+      action: 'Генерация вопросов интервью',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 2100,
+      tokensCompletion: 850,
+      totalTokens: 2950,
+      status: '200 OK',
+      latencyMs: 510,
+    },
+    {
+      id: 'req_106',
+      timestamp: '17:28:19',
+      action: 'Формирование предложений',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 3400,
+      tokensCompletion: 1120,
+      totalTokens: 4520,
+      status: '200 OK',
+      latencyMs: 620,
+    },
+    {
+      id: 'req_105',
+      timestamp: '16:50:11',
+      action: 'Развёртывание класса (system_pack)',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 1950,
+      tokensCompletion: 640,
+      totalTokens: 2590,
+      status: '200 OK',
+      latencyMs: 410,
+    },
+    {
+      id: 'req_104',
+      timestamp: '16:15:33',
+      action: 'Проверка RAG индекса',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 890,
+      tokensCompletion: 120,
+      totalTokens: 1010,
+      status: '200 OK',
+      latencyMs: 220,
+    },
+    {
+      id: 'req_103',
+      timestamp: '15:40:02',
+      action: 'Валидация графа элементов',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: 4100,
+      tokensCompletion: 980,
+      totalTokens: 5080,
+      status: '200 OK',
+      latencyMs: 780,
+    },
+  ]);
+
+  const [aiChartMetric, setAiChartMetric] = useState<'tokens' | 'requests'>('tokens');
+
+  const handleResetTotalTokens = () => {
+    setAiUsage((prev) => ({ ...prev, tt: 0 }));
+    showNotice('Искусственный лимит "TT" (Всего токенов) сброшен');
+  };
+
+  const handleSimulateAiRequest = () => {
+    const promptT = Math.floor(Math.random() * 1500) + 500;
+    const complT = Math.floor(Math.random() * 600) + 200;
+    const totalT = promptT + complT;
+    const newEntry = {
+      id: `req_${Date.now().toString().slice(-4)}`,
+      timestamp: new Date().toTimeString().slice(0, 8),
+      action: 'Тестовый запрос ИИ-ассистента',
+      model: 'gemini-2.5-flash',
+      tokensPrompt: promptT,
+      tokensCompletion: complT,
+      totalTokens: totalT,
+      status: '200 OK' as const,
+      latencyMs: Math.floor(Math.random() * 400) + 200,
+    };
+    setAiUsageHistory((prev) => [newEntry, ...prev]);
+    setAiUsage((prev) => ({
+      rpm: Math.min(aiLimits.rpm, prev.rpm + 1),
+      rpd: prev.rpd + 1,
+      tpm: prev.tpm + totalT,
+      tt: prev.tt + totalT,
+    }));
+    showNotice(`Запрос выполнен: +${totalT} токенов`);
+  };
   const [gitEnabled, setGitEnabled] = useState<boolean>(true);
   const [gitHistoryOpen, setGitHistoryOpen] = useState<boolean>(false);
   const [locale, setLocale] = useState<LocaleKey>('ru');
@@ -1033,11 +1283,10 @@ export function App() {
   const [diffFileSelect, setDiffFileSelect] =
     useState<string>('sys_inventory.pgr');
 
-  // AI Assistant state & modal
-  const [aiModalOpen, setAiModalOpen] = useState<boolean>(false);
-  const [aiModalSection, setAiModalSection] = useState<
-    'all' | 'contradictions' | 'proposals' | 'interview' | 'transform'
-  >('all');
+  // AI Assistant state & separate modals
+  const [aiActiveModal, setAiActiveModal] = useState<
+    'hub' | 'contradictions' | 'proposals' | 'interview' | 'transform' | null
+  >(null);
   const [transformSourceId, setTransformSourceId] =
     useState<string>('idea_backlog');
   const [transformPattern, setTransformPattern] = useState<
@@ -1180,6 +1429,489 @@ export function App() {
       setStatusNotice((prev) => (prev === msg ? null : prev));
     }, 3000);
   };
+
+  // Context Menu Handlers
+  const handleOpenContextMenu = (
+    e: React.MouseEvent,
+    target: KbContextMenuTarget
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setKbSubmenuOpen(false);
+    const menuWidth = 240;
+    const menuHeight = target.type === 'empty' ? 180 : 420;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 10);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 10);
+    setKbContextMenu({
+      x: Math.max(10, x),
+      y: Math.max(10, y),
+      target,
+    });
+  };
+
+  const isItemStarred = (target: KbContextMenuTarget) => {
+    if (target.type === 'file') return starredItems.has(target.fileName);
+    if (target.type === 'element') return starredItems.has(target.elementId);
+    if (target.type === 'folder') return starredItems.has(target.folderName);
+    return false;
+  };
+
+  const handleToggleImportant = (target: KbContextMenuTarget) => {
+    const id =
+      target.type === 'file'
+        ? target.fileName
+        : target.type === 'element'
+        ? target.elementId
+        : target.type === 'folder'
+        ? target.folderName
+        : null;
+    if (!id) return;
+    setStarredItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        showNotice(`Снята отметка: ${id}`);
+      } else {
+        next.add(id);
+        showNotice(`Отмечено как важное: ${id}`);
+      }
+      return next;
+    });
+  };
+
+  const handleCollapseAll = () => {
+    const nextFiles: Record<string, boolean> = {};
+    files.forEach((f) => {
+      nextFiles[f] = true;
+    });
+    const nextFolders: Record<string, boolean> = {};
+    customFolders.forEach((f) => {
+      nextFolders[f] = true;
+    });
+    setCollapsedFolders(nextFolders);
+    setCollapsedFiles(nextFiles);
+    showNotice('Все подпапки и файлы свернуты');
+  };
+
+  const handleExpandAll = () => {
+    setCollapsedFolders({});
+    setCollapsedFiles({});
+    showNotice('Все папки и файлы развернуты');
+  };
+
+  const handleOpenNewResource = (
+    type: 'file' | 'folder',
+    parentFolder?: string
+  ) => {
+    setNewResourceModal({
+      isOpen: true,
+      type,
+      parentFolder,
+      name: '',
+    });
+  };
+
+  const handleCreateResourceConfirm = () => {
+    if (!newResourceModal) return;
+    const raw = newResourceModal.name.trim();
+    if (!raw) {
+      setNewResourceModal(null);
+      return;
+    }
+    if (newResourceModal.type === 'folder') {
+      const folderSlug = raw.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+      if (!customFolders.includes(folderSlug)) {
+        setCustomFolders((prev) => [...prev, folderSlug]);
+      }
+      const initialFile = `${folderSlug}/sys_${folderSlug}_1.pgr`;
+      if (!files.includes(initialFile)) {
+        setFiles((prev) => [...prev, initialFile]);
+        setActiveFile(initialFile);
+      }
+      showNotice(`Создана папка ${folderSlug}/`);
+    } else {
+      let fileName = raw;
+      if (!fileName.endsWith('.pgr')) fileName += '.pgr';
+      if (newResourceModal.parentFolder && !fileName.includes('/')) {
+        fileName = `${newResourceModal.parentFolder}/${fileName}`;
+      }
+      if (!files.includes(fileName)) {
+        setFiles((prev) => [...prev, fileName]);
+        setActiveFile(fileName);
+        showNotice(`Создан файл ${fileName}`);
+      } else {
+        showNotice(`Файл ${fileName} уже существует`);
+      }
+    }
+    setNewResourceModal(null);
+  };
+
+  const handleStartRename = (target: KbContextMenuTarget) => {
+    if (target.type === 'file') {
+      const cur = target.fileName.includes('/')
+        ? target.fileName.split('/').slice(1).join('/')
+        : target.fileName;
+      setRenameModal({
+        isOpen: true,
+        type: 'file',
+        id: target.fileName,
+        currentName: target.fileName,
+        newName: cur,
+      });
+    } else if (target.type === 'element') {
+      setRenameModal({
+        isOpen: true,
+        type: 'element',
+        id: target.elementId,
+        sourceFileName: target.fileName,
+        currentName: target.elementId,
+        newName: target.elementId,
+      });
+    }
+  };
+
+  const handleConfirmRename = () => {
+    if (!renameModal) return;
+    const raw = renameModal.newName.trim();
+    if (!raw) {
+      setRenameModal(null);
+      return;
+    }
+    if (renameModal.type === 'file') {
+      let finalName = raw;
+      if (!finalName.endsWith('.pgr')) finalName += '.pgr';
+      if (renameModal.id.includes('/') && !finalName.includes('/')) {
+        const folder = renameModal.id.split('/')[0];
+        finalName = `${folder}/${finalName}`;
+      }
+      const oldName = renameModal.id;
+      if (oldName === finalName) {
+        setRenameModal(null);
+        return;
+      }
+      setFiles((prev) => prev.map((f) => (f === oldName ? finalName : f)));
+      setElements((prev) =>
+        prev.map((el) =>
+          el.fileName === oldName ? { ...el, fileName: finalName } : el
+        )
+      );
+      if (activeFile === oldName) setActiveFile(finalName);
+      setStarredItems((prev) => {
+        if (!prev.has(oldName)) return prev;
+        const next = new Set(prev);
+        next.delete(oldName);
+        next.add(finalName);
+        return next;
+      });
+      showNotice(`Файл переименован: ${oldName} -> ${finalName}`);
+    } else if (renameModal.type === 'element') {
+      const oldId = renameModal.id;
+      const newId = raw.replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (oldId === newId) {
+        setRenameModal(null);
+        return;
+      }
+      setElements((prev) =>
+        prev.map((el) => {
+          let updated = el;
+          if (el.id === oldId) {
+            updated = { ...updated, id: newId };
+          }
+          if (el.parent === oldId) {
+            updated = { ...updated, parent: newId };
+          }
+          if (el.extendsId === oldId) {
+            updated = { ...updated, extendsId: newId };
+          }
+          if (el.instanceOf === oldId) {
+            updated = { ...updated, instanceOf: newId };
+          }
+          if (el.components?.includes(oldId)) {
+            updated = {
+              ...updated,
+              components: el.components.map((c) => (c === oldId ? newId : c)),
+            };
+          }
+          if (el.uses?.includes(oldId)) {
+            updated = {
+              ...updated,
+              uses: el.uses.map((c) => (c === oldId ? newId : c)),
+            };
+          }
+          return updated;
+        })
+      );
+      if (selectedId === oldId) setSelectedId(newId);
+      setAiContextIds((prev) => prev.map((id) => (id === oldId ? newId : id)));
+      setStarredItems((prev) => {
+        if (!prev.has(oldId)) return prev;
+        const next = new Set(prev);
+        next.delete(oldId);
+        next.add(newId);
+        return next;
+      });
+      showNotice(`Элемент переименован: ${oldId} -> ${newId}`);
+    }
+    setRenameModal(null);
+  };
+
+  const handleDeleteFile = (fileName: string) => {
+    if (files.length <= 1) {
+      showNotice('Нельзя удалить единственный файл проекта');
+      return;
+    }
+    setDeleteFileConfirm(fileName);
+  };
+
+  const handleConfirmDeleteFile = () => {
+    if (!deleteFileConfirm) return;
+    const targetFile = deleteFileConfirm;
+    setFiles((prev) => prev.filter((f) => f !== targetFile));
+    setElements((prev) => prev.filter((el) => el.fileName !== targetFile));
+    if (activeFile === targetFile) {
+      const remaining = files.filter((f) => f !== targetFile);
+      setActiveFile(remaining[0] || '');
+      setSelectedId(null);
+    }
+    showNotice(`Файл ${targetFile} удалён`);
+    setDeleteFileConfirm(null);
+  };
+
+  const handleCut = (target: KbContextMenuTarget) => {
+    if (target.type === 'file') {
+      setKbClipboard({ mode: 'cut', type: 'file', id: target.fileName });
+      showNotice(`Вырезан файл: ${target.fileName}`);
+    } else if (target.type === 'element') {
+      setKbClipboard({
+        mode: 'cut',
+        type: 'element',
+        id: target.elementId,
+        sourceFileName: target.fileName,
+      });
+      showNotice(`Вырезан элемент: ${target.elementId}`);
+    }
+  };
+
+  const handleCopy = (target: KbContextMenuTarget) => {
+    if (target.type === 'file') {
+      setKbClipboard({ mode: 'copy', type: 'file', id: target.fileName });
+      showNotice(`Скопирован файл: ${target.fileName}`);
+    } else if (target.type === 'element') {
+      setKbClipboard({
+        mode: 'copy',
+        type: 'element',
+        id: target.elementId,
+        sourceFileName: target.fileName,
+      });
+      showNotice(`Скопирован элемент: ${target.elementId}`);
+    }
+  };
+
+  const handlePaste = (target: KbContextMenuTarget) => {
+    if (!kbClipboard) return;
+    const targetFile =
+      target.type === 'file'
+        ? target.fileName
+        : target.type === 'element'
+        ? target.fileName
+        : activeFile;
+
+    if (kbClipboard.type === 'element') {
+      const sourceEl = elements.find((e) => e.id === kbClipboard.id);
+      if (!sourceEl) {
+        showNotice('Исходный элемент не найден');
+        return;
+      }
+      if (kbClipboard.mode === 'cut') {
+        if (sourceEl.fileName === targetFile) {
+          showNotice(`Элемент уже находится в файле ${targetFile}`);
+          return;
+        }
+        const prevFileNames: Record<string, string> = {};
+        elements.forEach((el) => {
+          prevFileNames[el.id] = el.fileName;
+        });
+        const newEntry: MoveHistoryEntry = {
+          kind: 'kb_file_move',
+          fileNames: prevFileNames,
+          prevActiveFile: activeFile,
+          movedIds: [sourceEl.id],
+        };
+        const nextHistory = [...moveHistoryRef.current.slice(-49), newEntry];
+        moveHistoryRef.current = nextHistory;
+        setMoveHistory(nextHistory);
+        setElements((prev) =>
+          prev.map((el) =>
+            el.id === sourceEl.id ? { ...el, fileName: targetFile } : el
+          )
+        );
+        setActiveFile(targetFile);
+        setSelectedId(sourceEl.id);
+        setAiContextIds([sourceEl.id]);
+        setKbClipboard(null);
+        showNotice(`Элемент ${sourceEl.id} перемещён в ${targetFile}`);
+      } else {
+        const uniqueSuffix = Date.now().toString().slice(-4);
+        const newId = `${sourceEl.id}_copy_${uniqueSuffix}`;
+        const cloned: PlanElement = {
+          ...JSON.parse(JSON.stringify(sourceEl)),
+          id: newId,
+          title: `${sourceEl.title} (Копия)`,
+          fileName: targetFile,
+          position: {
+            x: (sourceEl.position?.x || 100) + 40,
+            y: (sourceEl.position?.y || 100) + 40,
+          },
+        };
+        setElements((prev) => [...prev, cloned]);
+        setActiveFile(targetFile);
+        setSelectedId(newId);
+        setAiContextIds([newId]);
+        showNotice(`Скопирован элемент ${newId} в ${targetFile}`);
+      }
+    } else if (kbClipboard.type === 'file') {
+      const sourceFile = kbClipboard.id;
+      const fileElems = elements.filter((e) => e.fileName === sourceFile);
+      const baseName = sourceFile.replace('.pgr', '');
+      const uniqueSuffix = Date.now().toString().slice(-4);
+      const newFileName = `${baseName}_copy_${uniqueSuffix}.pgr`;
+      const clonedElements: PlanElement[] = fileElems.map((el) => ({
+        ...JSON.parse(JSON.stringify(el)),
+        id: `${el.id}_c${uniqueSuffix}`,
+        fileName: newFileName,
+        position: {
+          x: (el.position?.x || 100) + 30,
+          y: (el.position?.y || 100) + 30,
+        },
+      }));
+      setFiles((prev) => [...prev, newFileName]);
+      setElements((prev) => [...prev, ...clonedElements]);
+      setActiveFile(newFileName);
+      if (kbClipboard.mode === 'cut') {
+        setKbClipboard(null);
+      }
+      showNotice(`Создана копия файла ${newFileName}`);
+    }
+  };
+
+  const handleDuplicate = (target: KbContextMenuTarget) => {
+    if (target.type === 'element') {
+      const sourceEl = elements.find((e) => e.id === target.elementId);
+      if (!sourceEl) return;
+      const uniqueSuffix = Date.now().toString().slice(-4);
+      const newId = `${sourceEl.id}_copy_${uniqueSuffix}`;
+      const cloned: PlanElement = {
+        ...JSON.parse(JSON.stringify(sourceEl)),
+        id: newId,
+        title: `${sourceEl.title} (Копия)`,
+        position: {
+          x: (sourceEl.position?.x || 100) + 40,
+          y: (sourceEl.position?.y || 100) + 40,
+        },
+      };
+      setElements((prev) => [...prev, cloned]);
+      setSelectedId(newId);
+      setAiContextIds([newId]);
+      showNotice(`Дублирован элемент ${newId}`);
+    } else if (target.type === 'file') {
+      const sourceFile = target.fileName;
+      const fileElems = elements.filter((e) => e.fileName === sourceFile);
+      const baseName = sourceFile.replace('.pgr', '');
+      const uniqueSuffix = Date.now().toString().slice(-4);
+      const newFileName = `${baseName}_copy_${uniqueSuffix}.pgr`;
+      const clonedElements: PlanElement[] = fileElems.map((el) => ({
+        ...JSON.parse(JSON.stringify(el)),
+        id: `${el.id}_c${uniqueSuffix}`,
+        fileName: newFileName,
+        position: {
+          x: (el.position?.x || 100) + 30,
+          y: (el.position?.y || 100) + 30,
+        },
+      }));
+      setFiles((prev) => [...prev, newFileName]);
+      setElements((prev) => [...prev, ...clonedElements]);
+      setActiveFile(newFileName);
+      showNotice(`Дублирован файл ${newFileName}`);
+    }
+  };
+
+  const handleShowInExplorer = (target: KbContextMenuTarget) => {
+    if (target.type === 'element') {
+      setActiveFile(target.fileName);
+      setSelectedId(target.elementId);
+      setAiContextIds([target.elementId]);
+      setCollapsedFiles((prev) => ({ ...prev, [target.fileName]: false }));
+      if (target.fileName.includes('/')) {
+        const folder = target.fileName.split('/')[0];
+        setCollapsedFolders((prev) => ({ ...prev, [folder]: false }));
+      }
+      showNotice(`Выбран элемент: ${target.elementId}`);
+    } else if (target.type === 'file') {
+      setActiveFile(target.fileName);
+      setCollapsedFiles((prev) => ({ ...prev, [target.fileName]: false }));
+      if (target.fileName.includes('/')) {
+        const folder = target.fileName.split('/')[0];
+        setCollapsedFolders((prev) => ({ ...prev, [folder]: false }));
+      }
+      showNotice(`Открыт файл: ${target.fileName}`);
+    } else if (target.type === 'folder') {
+      setCollapsedFolders((prev) => ({ ...prev, [target.folderName]: false }));
+      showNotice(`Открыта папка: ${target.folderName}/`);
+    } else {
+      setCollapsedFolders((prev) => ({ ...prev, __root__: false }));
+      showNotice(`Корневая папка проекта: ${projectRootFolder}/`);
+    }
+  };
+
+  const handleCopyPath = (
+    target: KbContextMenuTarget,
+    mode: 'relative' | 'full'
+  ) => {
+    let path = '';
+    if (target.type === 'file') {
+      path =
+        mode === 'full'
+          ? `${projectRootFolder}/${target.fileName}`
+          : target.fileName;
+    } else if (target.type === 'element') {
+      path =
+        mode === 'full'
+          ? `${projectRootFolder}/${target.fileName} -> ${target.elementId}`
+          : `${target.fileName}#${target.elementId}`;
+    } else if (target.type === 'folder') {
+      path =
+        mode === 'full'
+          ? `${projectRootFolder}/${target.folderName}/`
+          : `${target.folderName}/`;
+    } else {
+      path = mode === 'full' ? `${projectRootFolder}/` : './';
+    }
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(path);
+    }
+    showNotice(
+      `${mode === 'full' ? 'Полный' : 'Относительный'} путь скопирован: ${path}`
+    );
+  };
+
+  useEffect(() => {
+    const handleGlobalClick = () => {
+      setKbContextMenu(null);
+      setKbSubmenuOpen(false);
+    };
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setKbContextMenu(null);
+        setKbSubmenuOpen(false);
+      }
+    };
+    window.addEventListener('click', handleGlobalClick);
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener('click', handleGlobalClick);
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, []);
 
   // Sync theme and contextual color pairs to CSS variables
   useEffect(() => {
@@ -1481,8 +2213,7 @@ export function App() {
         }
         setTransformSourceId(targetEl.id);
         setTransformSummary(null);
-        setAiModalSection('transform');
-        setAiModalOpen(true);
+        setAiActiveModal('transform');
         showNotice(`Преобразование элемента: ${targetEl.id}`);
       } else if (optionId === 'node_open_kb') {
         setSelectedId(targetEl.id);
@@ -1523,17 +2254,14 @@ export function App() {
       if (contradictions.length > 0) {
         openConflictPopupFor(contradictions, contradictions[0].elementIds[0]);
       } else {
-        setAiModalSection('contradictions');
-        setAiModalOpen(true);
+        setAiActiveModal('contradictions');
         showNotice('Активных конфликтов на холсте не обнаружено');
       }
     } else if (optionId === 'proposals') {
-      setAiModalSection('proposals');
-      setAiModalOpen(true);
+      setAiActiveModal('proposals');
       showNotice('Открыты карточки-предложения ИИ');
     } else if (optionId === 'interview') {
-      setAiModalSection('interview');
-      setAiModalOpen(true);
+      setAiActiveModal('interview');
       showNotice('Открыто проблемное архитектурное интервью');
     } else if (optionId === 'rescan') {
       setIgnoredContradictionIds([]);
@@ -1941,6 +2669,264 @@ export function App() {
     showNotice(`Создан элемент ${created.id}`);
   };
 
+  const renderExplorerFileItem = (fileName: string, isNested?: boolean) => {
+    const fileElems = filteredElements.filter((e) => e.fileName === fileName);
+    const isFileActive = (selectedElement?.fileName || activeFile) === fileName;
+    const isDragTarget = dragOverFileName === fileName;
+    const isFileCollapsed = Boolean(collapsedFiles[fileName]);
+    const isStarred = starredItems.has(fileName);
+    const shortName =
+      isNested && fileName.includes('/')
+        ? fileName.split('/').slice(1).join('/')
+        : fileName;
+
+    return (
+      <div
+        key={fileName}
+        onContextMenu={(e) =>
+          handleOpenContextMenu(e, { type: 'file', fileName })
+        }
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          if (dragOverFileName !== fileName) {
+            setDragOverFileName(fileName);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setDragOverFileName((prev) => (prev === fileName ? null : prev));
+          }
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOverFileName(null);
+          let idsToMove: string[] =
+            kbDraggedIdsRef.current.length > 0
+              ? kbDraggedIdsRef.current
+              : kbDraggedIds;
+          if (idsToMove.length === 0) {
+            const raw = e.dataTransfer.getData('text/plain');
+            if (raw) {
+              try {
+                const parsed = JSON.parse(raw);
+                idsToMove = Array.isArray(parsed) ? parsed : [raw];
+              } catch {
+                idsToMove = [raw];
+              }
+            }
+          }
+          kbDraggedIdsRef.current = [];
+          setKbDraggedIds([]);
+          const movable = elementsRef.current.filter(
+            (el) => idsToMove.includes(el.id) && el.fileName !== fileName
+          );
+          if (movable.length === 0) return;
+          const prevFileNames: Record<string, string> = {};
+          elementsRef.current.forEach((el) => {
+            prevFileNames[el.id] = el.fileName;
+          });
+          const moveSet = new Set(movable.map((m) => m.id));
+          const newEntry: MoveHistoryEntry = {
+            kind: 'kb_file_move',
+            fileNames: prevFileNames,
+            prevActiveFile: activeFile,
+            movedIds: movable.map((m) => m.id),
+          };
+          const nextHistory = [...moveHistoryRef.current.slice(-49), newEntry];
+          moveHistoryRef.current = nextHistory;
+          setMoveHistory(nextHistory);
+
+          const nextElements = elementsRef.current.map((el) =>
+            moveSet.has(el.id) ? { ...el, fileName } : el
+          );
+          elementsRef.current = nextElements;
+          setElements(nextElements);
+          setActiveFile(fileName);
+          setUncommittedChanges((c) => c + 1);
+          if (
+            document.activeElement instanceof HTMLElement &&
+            (document.activeElement.tagName === 'INPUT' ||
+              document.activeElement.tagName === 'TEXTAREA' ||
+              document.activeElement.tagName === 'SELECT')
+          ) {
+            document.activeElement.blur();
+          }
+          if (movable.length === 1) {
+            showNotice(`Элемент ${movable[0].id} перемещён в ${fileName}`);
+          } else {
+            showNotice(
+              `Перемещено элементов (${movable.length}) в ${fileName}`
+            );
+          }
+        }}
+        style={
+          isDragTarget
+            ? {
+                borderColor: 'var(--ctx-pos-text)',
+                backgroundColor: 'var(--ctx-pos-soft)',
+                boxShadow: 'inset 0 0 0 1px var(--ctx-pos-text)',
+              }
+            : undefined
+        }
+        className={`file-entry transition-colors ${
+          isNested ? 'rounded mb-1' : ''
+        } ${isFileActive ? 'active-file' : ''}`}
+      >
+        <div
+          className="file-title"
+          onClick={() => {
+            setActiveFile(fileName);
+            if (fileElems[0]) {
+              setSelectedId(fileElems[0].id);
+              setAiContextIds([fileElems[0].id]);
+            }
+          }}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setCollapsedFiles((prev) => ({
+                  ...prev,
+                  [fileName]: !prev[fileName],
+                }));
+              }}
+              className="p-0.5 -ml-1 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer rounded transition-colors flex items-center justify-center"
+              title={
+                isFileCollapsed
+                  ? 'Развернуть элементы файла'
+                  : 'Свернуть элементы файла'
+              }
+            >
+              {isFileCollapsed ? (
+                <ChevronRight size={12} />
+              ) : (
+                <ChevronDown size={12} />
+              )}
+            </button>
+            <FileText size={13} className="shrink-0 text-[var(--ink-muted)]" />
+            <span className="truncate">{shortName}</span>
+            {isStarred && (
+              <span title="Отмечено как важное" className="inline-flex items-center ml-0.5">
+                <Star
+                  size={11}
+                  style={{
+                    color: 'var(--ctx-neg-text)',
+                    fill: 'var(--ctx-neg-text)',
+                  }}
+                  className="shrink-0"
+                />
+              </span>
+            )}
+          </div>
+          <span className="mono">{fileElems.length}</span>
+        </div>
+
+        {!isFileCollapsed && (
+          <>
+            {fileElems.length === 0 && (
+              <div className="mono text-[10px] py-1.5 px-2 rounded border border-dashed border-[var(--border)] text-center text-[var(--ink-muted)]">
+                Перетащите элементы сюда
+              </div>
+            )}
+
+            {fileElems.map((el) => {
+              const isSelectedEl =
+                selectedId === el.id || aiContextIds.includes(el.id);
+              const isElStarred = starredItems.has(el.id);
+              const TypeIcon = ELEMENT_TYPE_ICONS[el.type];
+              return (
+                <div
+                  key={el.id}
+                  draggable
+                  onContextMenu={(e) =>
+                    handleOpenContextMenu(e, {
+                      type: 'element',
+                      elementId: el.id,
+                      fileName,
+                    })
+                  }
+                  onDragStart={(e) => {
+                    const currentMulti = aiContextIdsRef.current;
+                    const ids =
+                      currentMulti.includes(el.id) && currentMulti.length > 0
+                        ? currentMulti
+                        : e.ctrlKey || e.metaKey
+                        ? Array.from(new Set([...currentMulti, el.id]))
+                        : [el.id];
+                    if (!currentMulti.includes(el.id)) {
+                      selectedIdRef.current = el.id;
+                      setSelectedId(el.id);
+                      aiContextIdsRef.current = ids;
+                      setAiContextIds(ids);
+                    }
+                    kbDraggedIdsRef.current = ids;
+                    setKbDraggedIds(ids);
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData(
+                      'text/plain',
+                      ids.length === 1 ? ids[0] : JSON.stringify(ids)
+                    );
+                  }}
+                  onDragEnd={() => {
+                    kbDraggedIdsRef.current = [];
+                    setKbDraggedIds([]);
+                    setDragOverFileName(null);
+                  }}
+                  onClick={(e) => {
+                    handleSelectWithModifiers(
+                      el.id,
+                      e.ctrlKey || e.metaKey,
+                      fileName
+                    );
+                    setLineRangeFilter(null);
+                  }}
+                  title="ЛКМ — выбрать, Ctrl+ЛКМ — контекст ИИ, ПКМ — меню, перетаскивание — переместить"
+                  className={`tree-node ${isSelectedEl ? 'active' : ''}`}
+                >
+                  <span
+                    className="mono truncate flex items-center gap-1.5 min-w-0"
+                    style={{
+                      color: isSelectedEl ? 'var(--ctx-pos-text)' : undefined,
+                    }}
+                  >
+                    <TypeIcon size={14} className="shrink-0" />
+                    <span className="truncate">{stripElementPrefix(el.id)}</span>
+                    {isElStarred && (
+                      <span title="Отмечено как важное" className="inline-flex items-center">
+                        <Star
+                          size={10}
+                          style={{
+                            color: 'var(--ctx-neg-text)',
+                            fill: 'var(--ctx-neg-text)',
+                          }}
+                          className="shrink-0"
+                        />
+                      </span>
+                    )}
+                  </span>
+                  {el.mvp && (
+                    <span
+                      className="pill"
+                      style={{
+                        color: 'var(--ctx-pos-text)',
+                        borderColor: 'var(--ctx-pos-border)',
+                      }}
+                    >
+                      MVP
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+    );
+  };
+
   const isProjectEmpty = files.length === 0 || elements.length === 0;
 
   return (
@@ -1992,19 +2978,21 @@ export function App() {
               <button
                 type="button"
                 onClick={() => setNewElementModalOpen(true)}
-                className="btn primary"
-                style={{ padding: '5px 12px', height: '28px' }}
+                className="btn primary flex items-center justify-center text-sm font-bold"
+                style={{ width: '28px', height: '28px', padding: 0 }}
+                title="Создать элемент"
               >
                 +
               </button>
 
               <button
                 type="button"
-                onClick={() => setAiModalOpen(true)}
-                className="btn"
-                style={{ padding: '5px 12px', height: '28px' }}
+                onClick={() => setAiActiveModal('hub')}
+                className="btn btn-ai-shimmer flex items-center justify-center"
+                style={{ width: '28px', height: '28px', padding: 0 }}
+                title={t.aiBtn}
               >
-                {t.aiBtn}
+                <Sparkles size={14} />
               </button>
             </>
           )}
@@ -2014,19 +3002,21 @@ export function App() {
               <button
                 type="button"
                 onClick={() => setNewElementModalOpen(true)}
-                className="btn primary"
-                style={{ padding: '5px 12px', height: '28px' }}
+                className="btn primary flex items-center justify-center text-sm font-bold"
+                style={{ width: '28px', height: '28px', padding: 0 }}
+                title="Создать элемент"
               >
                 +
               </button>
 
               <button
                 type="button"
-                onClick={() => setAiModalOpen(true)}
-                className="btn"
-                style={{ padding: '5px 12px', height: '28px' }}
+                onClick={() => setAiActiveModal('hub')}
+                className="btn btn-ai-shimmer flex items-center justify-center"
+                style={{ width: '28px', height: '28px', padding: 0 }}
+                title={t.aiBtn}
               >
-                {t.aiBtn}
+                <Sparkles size={14} />
               </button>
             </>
           )}
@@ -2080,7 +3070,10 @@ export function App() {
             }`}
           >
             <div className="files-column-inner">
-              <div className="p-3 border-b border-[var(--border)] space-y-2 shrink-0">
+              <div
+                className="p-3 border-b border-[var(--border)] space-y-2 shrink-0 relative"
+                ref={filterPopoverRef}
+              >
                 <div className="flex items-center gap-1.5">
                   <input
                     type="text"
@@ -2091,53 +3084,176 @@ export function App() {
                   />
                   <button
                     type="button"
+                    onClick={() => setIsKbFilterOpen((prev) => !prev)}
+                    className={`btn p-1.5 shrink-0 relative ${
+                      kbTypeFilter !== 'all' || kbMvpFilter !== 'all'
+                        ? 'border-[var(--accent)] text-[var(--accent)] font-bold'
+                        : ''
+                    }`}
+                    title="Фильтры по типу и MVP"
+                  >
+                    <Funnel size={14} />
+                    {(kbTypeFilter !== 'all' || kbMvpFilter !== 'all') && (
+                      <span
+                        style={{ backgroundColor: 'var(--ctx-pos-border)' }}
+                        className="absolute -top-1 -right-1 w-2 h-2 rounded-full"
+                      />
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => setLeftPanelOpen(false)}
                     className="btn p-1.5 shrink-0"
                     title="Свернуть левую панель"
                   >
-                    <PanelLeftClose size={15} />
+                    <PanelLeftClose size={14} />
                   </button>
                 </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <select
-                    value={kbTypeFilter}
-                    onChange={(e) =>
-                      setKbTypeFilter(e.target.value as ElementType | 'all')
-                    }
-                    className="sys-input mono text-[11px] w-full min-w-0 px-1.5 py-1 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
-                  >
-                    <option value="all">Все типы</option>
-                    <option value="system">Система</option>
-                    <option value="class">Класс</option>
-                    <option value="process">Процесс</option>
-                    <option value="component">Компонент</option>
-                    <option value="object">Объект</option>
-                    <option value="idea">Идея</option>
-                  </select>
-                  <select
-                    value={kbMvpFilter}
-                    onChange={(e) =>
-                      setKbMvpFilter(e.target.value as 'all' | 'mvp' | 'later')
-                    }
-                    className="sys-input mono text-[11px] w-full min-w-0 px-1.5 py-1 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
-                  >
-                    <option value="all">MVP: все</option>
-                    <option value="mvp">Только MVP</option>
-                    <option value="later">Потом</option>
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const name = `sys_module_${files.length + 1}.pgr`;
-                    setFiles((prev) => [...prev, name]);
-                    setActiveFile(name);
-                    showNotice(`Создан файл ${name}`);
-                  }}
-                  className="pill w-full text-center cursor-pointer hover:border-[var(--accent)] py-1 block"
-                >
-                  + файл
-                </button>
+
+                {isKbFilterOpen && (
+                  <div className="absolute left-2.5 right-2.5 top-[calc(100%+4px)] bg-[var(--surface)] border border-[var(--border)] rounded-lg shadow-2xl p-3 z-50 space-y-3">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-[var(--border)]">
+                      <div className="flex items-center gap-1.5 font-medium text-xs text-[var(--ink)]">
+                        <Funnel
+                          size={13}
+                          style={{ color: 'var(--ctx-pos-border)' }}
+                        />
+                        <span>Фильтры проводника</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {(kbTypeFilter !== 'all' ||
+                          kbMvpFilter !== 'all') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setKbTypeFilter('all');
+                              setKbMvpFilter('all');
+                              setIsKbFilterOpen(false);
+                            }}
+                            className="text-[10px] text-[var(--muted)] hover:text-[var(--ink)] px-1.5 py-0.5 rounded hover:bg-[var(--surface-hover)] cursor-pointer"
+                          >
+                            Сброс
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setIsKbFilterOpen(false)}
+                          className="text-xs text-[var(--muted)] hover:text-[var(--ink)] p-0.5 cursor-pointer leading-none"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[var(--muted)] block">
+                        Тип элемента
+                      </label>
+                      <select
+                        value={kbTypeFilter}
+                        onChange={(e) => {
+                          setKbTypeFilter(
+                            e.target.value as ElementType | 'all'
+                          );
+                          setIsKbFilterOpen(false);
+                        }}
+                        className="sys-input mono text-[11px] w-full min-w-0 px-2 py-1.5 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
+                      >
+                        <option value="all">Все типы</option>
+                        <option value="system">Система (sys_)</option>
+                        <option value="class">Класс (cls_)</option>
+                        <option value="process">Процесс (proc_)</option>
+                        <option value="component">Компонент (cmp_)</option>
+                        <option value="object">Объект (obj_)</option>
+                        <option value="idea">Идея (idea_)</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-[var(--muted)] block">
+                        Статус MVP
+                      </label>
+                      <select
+                        value={kbMvpFilter}
+                        onChange={(e) => {
+                          setKbMvpFilter(
+                            e.target.value as 'all' | 'mvp' | 'later'
+                          );
+                          setIsKbFilterOpen(false);
+                        }}
+                        className="sys-input mono text-[11px] w-full min-w-0 px-2 py-1.5 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
+                      >
+                        <option value="all">MVP: все</option>
+                        <option value="mvp">Только MVP</option>
+                        <option value="later">Потом</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {(kbTypeFilter !== 'all' || kbMvpFilter !== 'all') && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)] flex-wrap pt-1 border-t border-[var(--border)] mt-1">
+                    <span className="text-[var(--muted)]">Фильтр:</span>
+                    {kbTypeFilter !== 'all' && (
+                      <span
+                        style={{
+                          borderColor: 'var(--ctx-pos-border)',
+                          backgroundColor: 'var(--ctx-pos-soft)',
+                          color: 'var(--ctx-pos-text)',
+                        }}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] mono"
+                      >
+                        <span>
+                          {kbTypeFilter === 'system'
+                            ? 'Система'
+                            : kbTypeFilter === 'class'
+                            ? 'Класс'
+                            : kbTypeFilter === 'process'
+                            ? 'Процесс'
+                            : kbTypeFilter === 'component'
+                            ? 'Компонент'
+                            : kbTypeFilter === 'object'
+                            ? 'Объект'
+                            : kbTypeFilter === 'idea'
+                            ? 'Идея'
+                            : kbTypeFilter}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setKbTypeFilter('all')}
+                          className="hover:opacity-75 cursor-pointer font-bold ml-0.5"
+                          title="Убрать фильтр по типу"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                    {kbMvpFilter !== 'all' && (
+                      <span
+                        style={{
+                          borderColor: 'var(--ctx-pos-border)',
+                          backgroundColor: 'var(--ctx-pos-soft)',
+                          color: 'var(--ctx-pos-text)',
+                        }}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] mono"
+                      >
+                        <span>
+                          {kbMvpFilter === 'mvp' ? 'Только MVP' : 'Потом'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setKbMvpFilter('all')}
+                          className="hover:opacity-75 cursor-pointer font-bold ml-0.5"
+                          title="Убрать фильтр MVP"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {aiContextIds.length > 1 && (
                   <div
                     style={{
@@ -2163,218 +3279,130 @@ export function App() {
                 )}
               </div>
 
-              <div className="flex-1 overflow-y-auto">
-                {files.map((fileName) => {
-                  const fileElems = filteredElements.filter(
-                    (e) => e.fileName === fileName
+              <div
+                className="flex-1 overflow-y-auto flex flex-col"
+                onContextMenu={(e) => {
+                  if (
+                    e.target === e.currentTarget ||
+                    (e.target as HTMLElement).classList.contains('kb-empty-area')
+                  ) {
+                    handleOpenContextMenu(e, { type: 'empty' });
+                  }
+                }}
+              >
+                {/* Render subfolders with nested files */}
+                {Array.from(
+                  new Set([
+                    ...customFolders,
+                    ...files
+                      .filter((f) => f.includes('/'))
+                      .map((f) => f.split('/')[0]),
+                  ])
+                ).map((folderName) => {
+                  const folderFiles = files.filter((f) =>
+                    f.startsWith(`${folderName}/`)
                   );
-                  const isFileActive =
-                    (selectedElement?.fileName || activeFile) === fileName;
-                  const isDragTarget = dragOverFileName === fileName;
+                  const folderElems = filteredElements.filter((e) =>
+                    e.fileName.startsWith(`${folderName}/`)
+                  );
+                  const isFolderCollapsed = Boolean(
+                    collapsedFolders[folderName]
+                  );
+                  const isFolderStarred = starredItems.has(folderName);
                   return (
                     <div
-                      key={fileName}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = 'move';
-                        if (dragOverFileName !== fileName) {
-                          setDragOverFileName(fileName);
-                        }
-                      }}
-                      onDragLeave={(e) => {
-                        if (
-                          !e.currentTarget.contains(
-                            e.relatedTarget as Node | null
-                          )
-                        ) {
-                          setDragOverFileName((prev) =>
-                            prev === fileName ? null : prev
-                          );
-                        }
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragOverFileName(null);
-                        let idsToMove: string[] =
-                          kbDraggedIdsRef.current.length > 0
-                            ? kbDraggedIdsRef.current
-                            : kbDraggedIds;
-                        if (idsToMove.length === 0) {
-                          const raw = e.dataTransfer.getData('text/plain');
-                          if (raw) {
-                            try {
-                              const parsed = JSON.parse(raw);
-                              idsToMove = Array.isArray(parsed)
-                                ? parsed
-                                : [raw];
-                            } catch {
-                              idsToMove = [raw];
-                            }
-                          }
-                        }
-                        kbDraggedIdsRef.current = [];
-                        setKbDraggedIds([]);
-                        const movable = elementsRef.current.filter(
-                          (el) =>
-                            idsToMove.includes(el.id) &&
-                            el.fileName !== fileName
-                        );
-                        if (movable.length === 0) return;
-                        const prevFileNames: Record<string, string> = {};
-                        elementsRef.current.forEach((el) => {
-                          prevFileNames[el.id] = el.fileName;
-                        });
-                        const moveSet = new Set(movable.map((m) => m.id));
-                        const newEntry: MoveHistoryEntry = {
-                          kind: 'kb_file_move',
-                          fileNames: prevFileNames,
-                          prevActiveFile: activeFile,
-                          movedIds: movable.map((m) => m.id),
-                        };
-                        const nextHistory = [
-                          ...moveHistoryRef.current.slice(-49),
-                          newEntry,
-                        ];
-                        moveHistoryRef.current = nextHistory;
-                        setMoveHistory(nextHistory);
-
-                        const nextElements = elementsRef.current.map((el) =>
-                          moveSet.has(el.id) ? { ...el, fileName } : el
-                        );
-                        elementsRef.current = nextElements;
-                        setElements(nextElements);
-                        setActiveFile(fileName);
-                        setUncommittedChanges((c) => c + 1);
-                        if (
-                          document.activeElement instanceof HTMLElement &&
-                          (document.activeElement.tagName === 'INPUT' ||
-                            document.activeElement.tagName === 'TEXTAREA' ||
-                            document.activeElement.tagName === 'SELECT')
-                        ) {
-                          document.activeElement.blur();
-                        }
-                        if (movable.length === 1) {
-                          showNotice(
-                            `Элемент ${movable[0].id} перемещён в ${fileName}`
-                          );
-                        } else {
-                          showNotice(
-                            `Перемещено элементов (${movable.length}) в ${fileName}`
-                          );
-                        }
-                      }}
-                      style={
-                        isDragTarget
-                          ? {
-                              borderColor: 'var(--ctx-pos-text)',
-                              backgroundColor: 'var(--ctx-pos-soft)',
-                              boxShadow: 'inset 0 0 0 1px var(--ctx-pos-text)',
-                            }
-                          : undefined
+                      key={folderName}
+                      onContextMenu={(e) =>
+                        handleOpenContextMenu(e, {
+                          type: 'folder',
+                          folderName,
+                        })
                       }
-                      className={`file-entry transition-colors ${
-                        isFileActive ? 'active-file' : ''
-                      }`}
+                      className="border-b border-[var(--border)] bg-[var(--surface)]"
                     >
                       <div
-                        className="file-title"
-                        onClick={() => {
-                          setActiveFile(fileName);
-                          if (fileElems[0]) {
-                            setSelectedId(fileElems[0].id);
-                            setAiContextIds([fileElems[0].id]);
-                          }
-                        }}
+                        onClick={() =>
+                          setCollapsedFolders((prev) => ({
+                            ...prev,
+                            [folderName]: !prev[folderName],
+                          }))
+                        }
+                        className="flex items-center justify-between px-3 py-2 cursor-pointer select-none font-semibold text-xs text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors"
                       >
-                        <span>{fileName}</span>
-                        <span className="mono">{fileElems.length}</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {isFolderCollapsed ? (
+                            <ChevronRight
+                              size={13}
+                              className="shrink-0 text-[var(--ink-muted)]"
+                            />
+                          ) : (
+                            <ChevronDown
+                              size={13}
+                              className="shrink-0 text-[var(--ink-muted)]"
+                            />
+                          )}
+                          <Folder
+                            size={14}
+                            className="shrink-0 text-[var(--accent)]"
+                          />
+                          <span className="mono truncate">
+                            {folderName}/
+                          </span>
+                          {isFolderStarred && (
+                            <span title="Отмечено как важное" className="inline-flex items-center ml-0.5">
+                              <Star
+                                size={11}
+                                style={{
+                                  color: 'var(--ctx-neg-text)',
+                                  fill: 'var(--ctx-neg-text)',
+                                }}
+                                className="shrink-0"
+                              />
+                            </span>
+                          )}
+                        </div>
+                        <span className="pill text-[9px] py-0 px-1.5 mono">
+                          {folderFiles.length} ф. · {folderElems.length} эл.
+                        </span>
                       </div>
 
-                      {fileElems.length === 0 && (
-                        <div className="mono text-[10px] py-1.5 px-2 rounded border border-dashed border-[var(--border)] text-center text-[var(--ink-muted)]">
-                          Перетащите элементы сюда
+                      {!isFolderCollapsed && (
+                        <div className="pl-2 border-l-2 border-[var(--border)] ml-3 my-1 space-y-1">
+                          {folderFiles.length === 0 && (
+                            <div
+                              className="p-2 text-[10px] mono text-[var(--ink-muted)] cursor-default"
+                              onContextMenu={(e) =>
+                                handleOpenContextMenu(e, {
+                                  type: 'folder',
+                                  folderName,
+                                })
+                              }
+                            >
+                              Папка пуста (ПКМ — создать файл)
+                            </div>
+                          )}
+                          {folderFiles.map((fileName) =>
+                            renderExplorerFileItem(fileName, true)
+                          )}
                         </div>
                       )}
-
-                      {fileElems.map((el) => {
-                        const isSelectedEl =
-                          selectedId === el.id || aiContextIds.includes(el.id);
-                        const TypeIcon = ELEMENT_TYPE_ICONS[el.type];
-                        return (
-                          <div
-                            key={el.id}
-                            draggable
-                            onDragStart={(e) => {
-                              const currentMulti = aiContextIdsRef.current;
-                              const ids =
-                                currentMulti.includes(el.id) &&
-                                currentMulti.length > 0
-                                  ? currentMulti
-                                  : e.ctrlKey || e.metaKey
-                                  ? Array.from(new Set([...currentMulti, el.id]))
-                                  : [el.id];
-                              if (!currentMulti.includes(el.id)) {
-                                selectedIdRef.current = el.id;
-                                setSelectedId(el.id);
-                                aiContextIdsRef.current = ids;
-                                setAiContextIds(ids);
-                              }
-                              kbDraggedIdsRef.current = ids;
-                              setKbDraggedIds(ids);
-                              e.dataTransfer.effectAllowed = 'move';
-                              e.dataTransfer.setData(
-                                'text/plain',
-                                ids.length === 1 ? ids[0] : JSON.stringify(ids)
-                              );
-                            }}
-                            onDragEnd={() => {
-                              kbDraggedIdsRef.current = [];
-                              setKbDraggedIds([]);
-                              setDragOverFileName(null);
-                            }}
-                            onClick={(e) => {
-                              handleSelectWithModifiers(
-                                el.id,
-                                e.ctrlKey || e.metaKey,
-                                fileName
-                              );
-                              setLineRangeFilter(null);
-                            }}
-                            title="ЛКМ — выбрать, Ctrl+ЛКМ — множественное выделение (контекст ИИ), перетаскивание — переместить в другой файл .pgr"
-                            className={`tree-node ${
-                              isSelectedEl ? 'active' : ''
-                            }`}
-                          >
-                            <span
-                              className="mono truncate flex items-center gap-2 min-w-0"
-                              style={{
-                                color: isSelectedEl
-                                  ? 'var(--ctx-pos-text)'
-                                  : undefined,
-                              }}
-                            >
-                              <TypeIcon size={14} className="shrink-0" />
-                              <span className="truncate">
-                                {stripElementPrefix(el.id)}
-                              </span>
-                            </span>
-                            {el.mvp && (
-                              <span
-                                className="pill"
-                                style={{
-                                  color: 'var(--ctx-pos-text)',
-                                  borderColor: 'var(--ctx-pos-border)',
-                                }}
-                              >
-                                MVP
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
                     </div>
                   );
                 })}
+
+                {/* Root Files (files with no folder prefix) */}
+                {files
+                  .filter((fileName) => !fileName.includes('/'))
+                  .map((fileName) => renderExplorerFileItem(fileName, false))}
+
+                {/* Empty Filler Area (supports Right-Click anywhere on blank space) */}
+                <div
+                  className="flex-1 min-h-[80px] cursor-default kb-empty-area"
+                  title="ПКМ — контекстное меню проводника"
+                  onContextMenu={(e) =>
+                    handleOpenContextMenu(e, { type: 'empty' })
+                  }
+                />
               </div>
 
               {/* Empty Project Demo Switcher */}
@@ -4263,7 +5291,7 @@ export function App() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setAiModalOpen(true)}
+                      onClick={() => setAiActiveModal('hub')}
                       className="mono underline cursor-pointer text-[10px]"
                     >
                       Все ({proposals.length + contradictions.length})
@@ -5265,7 +6293,9 @@ export function App() {
                       style={{
                         left: `${el.position.x}px`,
                         top: `${el.position.y}px`,
-                        borderColor: isSelected ? activeStrokeColor : undefined,
+                        borderTopColor: isSelected ? activeStrokeColor : undefined,
+                        borderRightColor: isSelected ? activeStrokeColor : undefined,
+                        borderBottomColor: isSelected ? activeStrokeColor : undefined,
                         borderLeftWidth: markerColor ? '3px' : undefined,
                         borderLeftColor:
                           markerColor ||
@@ -6083,27 +7113,364 @@ export function App() {
 
                 {/* 3. AI Assistant */}
                 <div className="field-row">
-                  <div className="field-label">ИИ-ассистент</div>
-                  <div className="field-value space-y-3">
-                    <div className="flex items-center gap-3">
-                      <span className="mono">Endpoint:</span>
-                      <input
-                        type="text"
-                        value={aiEndpoint}
-                        onChange={(e) => setAiEndpoint(e.target.value)}
-                        className="sys-input flex-1 mono"
-                      />
+                  <div className="field-label">ИИ-ассистент & Лимиты</div>
+                  <div className="field-value space-y-5 w-full">
+                    {/* Endpoint & Key */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3.5 border border-[var(--border)] rounded-lg bg-[var(--surface-hover)]">
+                      <div>
+                        <label className="label block mb-1">Endpoint API</label>
+                        <input
+                          type="text"
+                          value={aiEndpoint}
+                          onChange={(e) => setAiEndpoint(e.target.value)}
+                          className="sys-input w-full mono text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="label block mb-1">API Key</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            value={aiApiKey}
+                            onChange={(e) => setAiApiKey(e.target.value)}
+                            className="sys-input flex-1 mono text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => showNotice('API ключ сохранён')}
+                            className="btn pos text-xs shrink-0"
+                          >
+                            Сохранить
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    <label className="inline-flex items-center gap-2 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={aiEnabled}
-                        onChange={(e) => setAiEnabled(e.target.checked)}
-                      />
-                      <span>
-                        Включить ИИ-функции (опционально, приложение работает и в ручном режиме)
-                      </span>
-                    </label>
+
+                    <div className="flex items-center justify-between">
+                      <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-medium">
+                        <input
+                          type="checkbox"
+                          checked={aiEnabled}
+                          onChange={(e) => setAiEnabled(e.target.checked)}
+                        />
+                        <span>Включить ИИ-функции ассистента</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleSimulateAiRequest}
+                        className="btn text-xs flex items-center gap-1.5"
+                        title="Сгенерировать тестовый запрос для проверки истории и графиков"
+                      >
+                        <Zap size={13} className="text-[var(--accent)]" />
+                        <span>Симулировать запрос</span>
+                      </button>
+                    </div>
+
+                    {/* Artificial Limits Section */}
+                    <div className="space-y-3 pt-2 border-t border-[var(--border)]">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
+                          <Gauge size={15} className="text-[var(--accent)]" />
+                          <span>Искусственные лимиты использования ключа</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleResetTotalTokens}
+                          className="btn neg text-xs flex items-center gap-1.5 py-1 px-2.5"
+                          title="Сбросить накопленный счётчик токенов TT"
+                        >
+                          <RotateCcw size={12} />
+                          <span>Сбросить TT (Всего)</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        {/* RPM */}
+                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold mono text-[var(--accent)]">RPM</span>
+                            <span className="text-[10px] text-[var(--ink-muted)]">Запросы/мин</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={1}
+                              value={aiLimits.rpm}
+                              onChange={(e) =>
+                                setAiLimits((prev) => ({
+                                  ...prev,
+                                  rpm: Math.max(1, parseInt(e.target.value) || 1),
+                                }))
+                              }
+                              className="sys-input w-full text-xs mono py-1 px-2"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
+                              <span>Использовано: {aiUsage.rpm}</span>
+                              <span>{Math.round((aiUsage.rpm / aiLimits.rpm) * 100)}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[var(--accent)] transition-all"
+                                style={{ width: `${Math.min(100, (aiUsage.rpm / aiLimits.rpm) * 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* RPD */}
+                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold mono text-[var(--accent)]">RPD</span>
+                            <span className="text-[10px] text-[var(--ink-muted)]">Запросы/день</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={1}
+                              value={aiLimits.rpd}
+                              onChange={(e) =>
+                                setAiLimits((prev) => ({
+                                  ...prev,
+                                  rpd: Math.max(1, parseInt(e.target.value) || 1),
+                                }))
+                              }
+                              className="sys-input w-full text-xs mono py-1 px-2"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
+                              <span>Использовано: {aiUsage.rpd}</span>
+                              <span>{Math.round((aiUsage.rpd / aiLimits.rpd) * 100)}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[var(--accent)] transition-all"
+                                style={{ width: `${Math.min(100, (aiUsage.rpd / aiLimits.rpd) * 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* TPM */}
+                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold mono text-[var(--ctx-pos-text)]">TPM</span>
+                            <span className="text-[10px] text-[var(--ink-muted)]">Токены/день</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={100}
+                              step={1000}
+                              value={aiLimits.tpm}
+                              onChange={(e) =>
+                                setAiLimits((prev) => ({
+                                  ...prev,
+                                  tpm: Math.max(100, parseInt(e.target.value) || 100),
+                                }))
+                              }
+                              className="sys-input w-full text-xs mono py-1 px-2"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
+                              <span>Использовано: {aiUsage.tpm.toLocaleString()}</span>
+                              <span>{Math.round((aiUsage.tpm / aiLimits.tpm) * 100)}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[var(--ctx-pos-text)] transition-all"
+                                style={{ width: `${Math.min(100, (aiUsage.tpm / aiLimits.tpm) * 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* TT */}
+                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold mono text-[var(--ctx-neg-text)]">TT</span>
+                            <span className="text-[10px] text-[var(--ink-muted)]">Токены всего</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={1000}
+                              step={10000}
+                              value={aiLimits.tt}
+                              onChange={(e) =>
+                                setAiLimits((prev) => ({
+                                  ...prev,
+                                  tt: Math.max(1000, parseInt(e.target.value) || 1000),
+                                }))
+                              }
+                              className="sys-input w-full text-xs mono py-1 px-2"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
+                              <span>Использовано: {aiUsage.tt.toLocaleString()}</span>
+                              <span>{aiLimits.tt > 0 ? Math.round((aiUsage.tt / aiLimits.tt) * 100) : 0}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[var(--ctx-neg-text)] transition-all"
+                                style={{
+                                  width: `${aiLimits.tt > 0 ? Math.min(100, (aiUsage.tt / aiLimits.tt) * 100) : 0}%`,
+                                }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Chart Section */}
+                    <div className="space-y-3 pt-3 border-t border-[var(--border)]">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
+                          <BarChart2 size={15} className="text-[var(--accent)]" />
+                          <span>График активности и потребления токенов</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setAiChartMetric('tokens')}
+                            className={`pill cursor-pointer px-2.5 py-1 text-[11px] ${
+                              aiChartMetric === 'tokens' ? 'border-[var(--accent)] text-[var(--accent)]' : ''
+                            }`}
+                          >
+                            Токены (TPM)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAiChartMetric('requests')}
+                            className={`pill cursor-pointer px-2.5 py-1 text-[11px] ${
+                              aiChartMetric === 'requests' ? 'border-[var(--accent)] text-[var(--accent)]' : ''
+                            }`}
+                          >
+                            Запросы (RPM)
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* SVG Bar Chart */}
+                      <div className="p-4 border border-[var(--border)] rounded-xl bg-[var(--bg)] space-y-2">
+                        <div className="h-32 flex items-end justify-between gap-1.5 pt-4 px-2 relative">
+                          {/* Reference line */}
+                          <div className="absolute left-0 right-0 top-6 border-b border-dashed border-[var(--border)] pointer-events-none" />
+                          <span className="absolute left-2 top-2 text-[9px] mono text-[var(--ink-muted)]">
+                            {aiChartMetric === 'tokens' ? 'Лимит TPM: 90k' : 'Лимит RPM: 60'}
+                          </span>
+
+                          {[
+                            { hour: '10:00', tokens: 12000, requests: 8 },
+                            { hour: '11:00', tokens: 28000, requests: 18 },
+                            { hour: '12:00', tokens: 19500, requests: 12 },
+                            { hour: '13:00', tokens: 8400, requests: 5 },
+                            { hour: '14:00', tokens: 35000, requests: 22 },
+                            { hour: '15:00', tokens: 14200, requests: 9 },
+                            { hour: '16:00', tokens: 48000, requests: 31 },
+                            { hour: '17:00', tokens: 28400, requests: 14 },
+                          ].map((bar, idx) => {
+                            const val = aiChartMetric === 'tokens' ? bar.tokens : bar.requests;
+                            const maxVal = aiChartMetric === 'tokens' ? 90000 : 60;
+                            const heightPercent = Math.min(100, Math.max(8, (val / maxVal) * 100));
+                            return (
+                              <div
+                                key={idx}
+                                className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end group cursor-pointer relative"
+                              >
+                                <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute -top-8 bg-[var(--surface)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[9px] mono text-[var(--ink)] shadow-md z-10 whitespace-nowrap pointer-events-none">
+                                  {bar.hour}: {val.toLocaleString()} {aiChartMetric === 'tokens' ? 'ток.' : 'запр.'}
+                                </div>
+                                <div
+                                  className="w-full rounded-t transition-all group-hover:opacity-80"
+                                  style={{
+                                    height: `${heightPercent}%`,
+                                    backgroundColor:
+                                      aiChartMetric === 'tokens' ? 'var(--ctx-pos-text)' : 'var(--accent)',
+                                  }}
+                                />
+                                <span className="text-[9px] mono text-[var(--ink-muted)] shrink-0">
+                                  {bar.hour}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* History Table */}
+                    <div className="space-y-3 pt-3 border-t border-[var(--border)]">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
+                          <Activity size={15} className="text-[var(--accent)]" />
+                          <span>История использования ключа ({aiUsageHistory.length})</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAiUsageHistory([]);
+                            showNotice('История использования очищена');
+                          }}
+                          className="btn text-[11px] py-1 px-2"
+                        >
+                          Очистить историю
+                        </button>
+                      </div>
+
+                      <div className="border border-[var(--border)] rounded-xl overflow-hidden bg-[var(--bg)]">
+                        <div className="max-h-56 overflow-y-auto">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-[var(--border)] bg-[var(--surface-hover)] text-[10px] mono text-[var(--ink-muted)] uppercase">
+                                <th className="p-2.5">Время</th>
+                                <th className="p-2.5">Действие</th>
+                                <th className="p-2.5">Модель</th>
+                                <th className="p-2.5 text-right">Токены</th>
+                                <th className="p-2.5 text-right">Задержка</th>
+                                <th className="p-2.5 text-center">Статус</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[var(--border)] mono text-[11px]">
+                              {aiUsageHistory.length === 0 ? (
+                                <tr>
+                                  <td colSpan={6} className="p-4 text-center text-[var(--ink-muted)] text-xs">
+                                    История пуста
+                                  </td>
+                                </tr>
+                              ) : (
+                                aiUsageHistory.map((item) => (
+                                  <tr
+                                    key={item.id}
+                                    className="hover:bg-[var(--surface-hover)] transition-colors"
+                                  >
+                                    <td className="p-2.5 text-[var(--ink-muted)]">{item.timestamp}</td>
+                                    <td className="p-2.5 font-medium text-[var(--ink)]">{item.action}</td>
+                                    <td className="p-2.5 text-[var(--ink-muted)]">{item.model}</td>
+                                    <td className="p-2.5 text-right font-bold text-[var(--ctx-pos-text)]">
+                                      {item.totalTokens.toLocaleString()}
+                                    </td>
+                                    <td className="p-2.5 text-right text-[var(--ink-muted)]">
+                                      {item.latencyMs}ms
+                                    </td>
+                                    <td className="p-2.5 text-center">
+                                      <span className="pill text-[9px] bg-[var(--ctx-pos-soft)] text-[var(--ctx-pos-text)] border-[var(--ctx-pos-border)]">
+                                        {item.status}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -6322,18 +7689,180 @@ export function App() {
       </footer>
 
       {/* =================================================================
-          MODAL: ИИ-ассистент (Полное окно предложений, противоречий, интервью, преобразования и RAG)
+          MODAL: Ассистент — Выбор раздела (AI Hub Launcher)
          ================================================================= */}
-      {aiModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6">
-          <div className="w-full max-w-4xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-lg bg-[var(--surface)] overflow-hidden">
+      {aiActiveModal === 'hub' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
+          <div className="w-full max-w-lg border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-4 sm:p-5 border-b border-[var(--border)] flex items-center justify-between bg-[var(--bg)]">
+              <div className="flex items-center gap-2.5">
+                <div
+                  style={{
+                    backgroundColor: 'var(--ctx-pos-soft)',
+                    borderColor: 'var(--ctx-pos-border)',
+                    color: 'var(--ctx-pos-text)',
+                  }}
+                  className="w-8 h-8 rounded-lg border flex items-center justify-center"
+                >
+                  <Sparkles size={16} />
+                </div>
+                <div>
+                  <div className="text-sm font-bold text-[var(--ink)] tracking-tight">
+                    Ассистент
+                  </div>
+                  <div className="text-[11px] mono text-[var(--ink-muted)]">
+                    Выберите нужный раздел анализа
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiActiveModal(null)}
+                className="btn p-1.5 shrink-0 rounded-lg hover:bg-[var(--surface-hover)]"
+                title="Закрыть"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-3.5">
+                {/* Card 1: Противоречия */}
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('contradictions')}
+                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ctx-neg-border)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
+                >
+                  <div
+                    style={{
+                      borderColor: 'var(--ctx-neg-border)',
+                      backgroundColor: 'var(--ctx-neg-soft)',
+                      color: 'var(--ctx-neg-text)',
+                    }}
+                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
+                  >
+                    <AlertTriangle size={26} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--ctx-neg-text)] transition-colors">
+                      Противоречия
+                    </div>
+                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
+                      {contradictions.length} найдено
+                    </div>
+                  </div>
+                </button>
+
+                {/* Card 2: Предложения */}
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('proposals')}
+                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ctx-pos-border)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
+                >
+                  <div
+                    style={{
+                      borderColor: 'var(--ctx-pos-border)',
+                      backgroundColor: 'var(--ctx-pos-soft)',
+                      color: 'var(--ctx-pos-text)',
+                    }}
+                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
+                  >
+                    <Lightbulb size={26} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--ctx-pos-text)] transition-colors">
+                      Предложения
+                    </div>
+                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
+                      {proposals.length} доступно
+                    </div>
+                  </div>
+                </button>
+
+                {/* Card 3: Интервью */}
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('interview')}
+                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--accent)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
+                >
+                  <div
+                    style={{
+                      borderColor: 'var(--border)',
+                      backgroundColor: 'var(--surface)',
+                      color: 'var(--accent)',
+                    }}
+                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
+                  >
+                    <MessageSquare size={26} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--accent)] transition-colors">
+                      Интервью
+                    </div>
+                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
+                      {interviewQuestions.length} вопросов
+                    </div>
+                  </div>
+                </button>
+
+                {/* Card 4: Преобразование */}
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('transform')}
+                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ink-muted)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
+                >
+                  <div className="w-14 h-14 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] flex items-center justify-center group-hover:scale-105 transition-transform">
+                    <Workflow size={26} />
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold text-[var(--ink)] transition-colors">
+                      Преобразование
+                    </div>
+                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
+                      Развертывание
+                    </div>
+                  </div>
+                </button>
+              </div>
+
+              {/* Footer context info */}
+              <div className="pt-2 border-t border-[var(--border)] flex items-center justify-between text-[11px] mono text-[var(--ink-muted)]">
+                <span>
+                  Контекст:{' '}
+                  {aiContextIds.length > 0
+                    ? `${aiContextIds.length} элем.`
+                    : 'Весь проект'}
+                </span>
+                <span className="text-[10px]">Ctrl+ЛКМ для выбора</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL 1: Противоречия (Отдельный попап)
+         ================================================================= */}
+      {aiActiveModal === 'contradictions' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
+          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             <div className="panel-header">
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="label" style={{ color: 'var(--accent)' }}>
-                  AI ASSISTANT · ПРОАКТИВНЫЙ АНАЛИЗ И ИНТЕРВЬЮ
-                </span>
-                <span className="pill">
-                  Контекст (Ctrl+ЛКМ):{' '}
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('hub')}
+                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
+                  title="Вернуться к выбору разделов"
+                >
+                  <ArrowLeft size={13} />
+                  <span>К разделам</span>
+                </button>
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ctx-neg-text)]">
+                  <AlertTriangle size={15} />
+                  <span>Противоречия ({contradictions.length})</span>
+                </div>
+                <span className="pill text-[10px]">
+                  Контекст:{' '}
                   {aiContextIds.length > 0
                     ? aiContextIds.join(', ')
                     : 'Весь проект'}
@@ -6341,285 +7870,377 @@ export function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setAiModalOpen(false)}
+                onClick={() => setAiActiveModal(null)}
                 className="btn py-1 px-2.5"
               >
                 Закрыть
               </button>
             </div>
 
-            {/* Section Filter Tabs inside AI Modal */}
-            <div className="px-6 py-2.5 border-b border-[var(--border)] bg-[var(--bg)] flex items-center gap-2 flex-wrap">
-              {(
-                [
-                  { id: 'all', label: 'Все разделы' },
-                  {
-                    id: 'contradictions',
-                    label: `Противоречия (${contradictions.length})`,
-                  },
-                  {
-                    id: 'proposals',
-                    label: `Предложения (${proposals.length})`,
-                  },
-                  {
-                    id: 'interview',
-                    label: `Интервью (${interviewQuestions.length})`,
-                  },
-                  { id: 'transform', label: 'Преобразовать' },
-                ] as {
-                  id:
-                    | 'all'
-                    | 'contradictions'
-                    | 'proposals'
-                    | 'interview'
-                    | 'transform';
-                  label: string;
-                }[]
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setAiModalSection(tab.id)}
-                  className={`btn py-1 px-2.5 text-[11px] ${
-                    aiModalSection === tab.id ? 'primary' : ''
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              {(aiModalSection === 'all' ||
-                aiModalSection === 'contradictions') && (
-                <div>
-                  <div className="section-title">
-                    <span>Противоречия ({contradictions.length})</span>
-                  </div>
-                  <div className="space-y-2">
-                    {contradictions.map((c) => (
-                      <div
-                        key={c.id}
-                        className="p-3 border border-[var(--border)] rounded bg-[var(--bg)] flex items-center justify-between gap-4"
-                      >
-                        <div className="space-y-1">
-                          <div
-                            className="text-xs font-semibold"
-                            style={{ color: 'var(--ctx-neg-text)' }}
-                          >
-                            ⚠ {c.title}
-                          </div>
-                          <div className="mono">{c.description}</div>
-                        </div>
-                        {c.suggestedFix && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const { targetElementId, patch } =
-                                c.suggestedFix!;
-                              setElements((prev) =>
-                                prev.map((el) =>
-                                  el.id === targetElementId
-                                    ? { ...el, ...patch }
-                                    : el
-                                )
-                              );
-                              setContradictions((prev) =>
-                                prev.filter((x) => x.id !== c.id)
-                              );
-                              showNotice(c.suggestedFix!.fixLabel);
-                            }}
-                            className="btn pos shrink-0"
-                          >
-                            Исправить
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3">
+              {contradictions.length === 0 ? (
+                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
+                  Активных противоречий и конфликтов в выбранном контексте не
+                  обнаружено.
                 </div>
-              )}
-
-              {(aiModalSection === 'all' || aiModalSection === 'proposals') && (
-                <div>
-                  <div className="section-title">
-                    <span>Карточки-предложения ({proposals.length})</span>
-                  </div>
-                  <div className="space-y-2">
-                    {proposals.map((prop) => (
+              ) : (
+                contradictions.map((c) => (
+                  <div
+                    key={c.id}
+                    className="p-3.5 border border-[var(--border)] rounded-lg bg-[var(--bg)] flex items-center justify-between gap-4"
+                  >
+                    <div className="space-y-1 min-w-0">
                       <div
-                        key={prop.id}
-                        className="p-3 border border-[var(--border)] rounded bg-[var(--bg)] flex items-center justify-between gap-4"
+                        className="text-xs font-semibold"
+                        style={{ color: 'var(--ctx-neg-text)' }}
                       >
-                        <div className="space-y-1">
-                          <div className="text-xs font-semibold">
-                            {prop.title}
-                          </div>
-                          <div className="mono">{prop.rationale}</div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handleApplyProposal(prop)}
-                            className="btn pos"
-                          >
-                            Применить
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setRejectProposalModal(prop)}
-                            className="btn neg"
-                          >
-                            Отклонить
-                          </button>
-                        </div>
+                        ⚠ {c.title}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {(aiModalSection === 'all' || aiModalSection === 'interview') && (
-                <div>
-                  <div className="section-title">
-                    <span>Проблемное интервью</span>
-                  </div>
-                  <div className="space-y-2">
-                    {interviewQuestions.map((q) => (
-                      <div
-                        key={q.id}
-                        className="p-3 border border-[var(--border)] rounded bg-[var(--bg)] space-y-2"
-                      >
-                        <div className="text-xs font-semibold">
-                          {q.question}
-                        </div>
-                        <div className="mono">{q.weakSpotContext}</div>
-                        <div className="flex flex-wrap gap-2 pt-1">
-                          {q.quickOptions.map((opt, idx) => (
+                      <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
+                        {c.description}
+                      </div>
+                      {c.elementIds.length > 0 && (
+                        <div className="flex items-center gap-1 pt-1 flex-wrap">
+                          <span className="text-[10px] text-[var(--ink-muted)]">
+                            Элементы:
+                          </span>
+                          {c.elementIds.map((eid) => (
                             <button
-                              key={idx}
+                              key={eid}
                               type="button"
                               onClick={() => {
-                                if (q.targetElementId) {
-                                  setElements((prev) =>
-                                    prev.map((el) =>
-                                      el.id === q.targetElementId
-                                        ? {
-                                            ...el,
-                                            description: `${el.description} [Правило: ${opt}]`,
-                                          }
-                                        : el
-                                    )
-                                  );
-                                }
-                                showNotice(
-                                  `Ответ записан в ${q.targetElementId}`
-                                );
+                                setSelectedId(eid);
+                                setAiActiveModal(null);
                               }}
-                              className="btn"
+                              className="pill text-[10px] cursor-pointer hover:border-[var(--accent)]"
                             >
-                              → {opt}
+                              {eid}
                             </button>
                           ))}
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {(aiModalSection === 'all' || aiModalSection === 'transform') && (
-                <div>
-                  <div className="section-title">
-                    <span>Преобразование элемента в систему блоков</span>
-                  </div>
-                  <div className="p-4 border border-[var(--border)] rounded bg-[var(--bg)] space-y-3">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="label block mb-1">
-                          Исходный элемент плана
-                        </label>
-                        <select
-                          value={transformSourceId}
-                          onChange={(e) => setTransformSourceId(e.target.value)}
-                          className="sys-input w-full mono"
-                        >
-                          {elements.map((el) => (
-                            <option key={el.id} value={el.id}>
-                              {el.id} — {el.title}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="label block mb-1">
-                          Шаблон развёртывания
-                        </label>
-                        <select
-                          value={transformPattern}
-                          onChange={(e) =>
-                            setTransformPattern(
-                              e.target.value as
-                                | 'system_pack'
-                                | 'class_hierarchy'
-                                | 'process_chain'
-                            )
-                          }
-                          className="sys-input w-full"
-                        >
-                          <option value="system_pack">
-                            Система + Компонент + Класс
-                          </option>
-                          <option value="class_hierarchy">
-                            Класс + эталонный Объект (instance_of)
-                          </option>
-                          <option value="process_chain">
-                            Пошаговая Процесс-функция взаимодействия
-                          </option>
-                        </select>
-                      </div>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const src =
-                          elements.find((e) => e.id === transformSourceId) ||
-                          elements[0];
-                        if (!src) return;
-                        const res = generateLocalTransformation(
-                          src,
-                          transformPattern
-                        );
-                        setElements((prev) => {
-                          const existingIds = new Set(prev.map((x) => x.id));
-                          const fresh = res.createdElements.filter(
-                            (x) => !existingIds.has(x.id)
+                    {c.suggestedFix && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const { targetElementId, patch } = c.suggestedFix!;
+                          setElements((prev) =>
+                            prev.map((el) =>
+                              el.id === targetElementId
+                                ? { ...el, ...patch }
+                                : el
+                            )
                           );
-                          return [...prev, ...fresh];
-                        });
-                        setUncommittedChanges((c) => c + 1);
-                        setTransformSummary(res.summary);
-                        showNotice(res.summary);
-                      }}
-                      className="btn pos"
-                    >
-                      Развернуть и добавить на Холст
-                    </button>
-                    {transformSummary && (
-                      <div
-                        style={{
-                          borderColor: 'var(--ctx-pos-border)',
-                          backgroundColor: 'var(--ctx-pos-soft)',
-                          color: 'var(--ctx-pos-text)',
+                          setContradictions((prev) =>
+                            prev.filter((x) => x.id !== c.id)
+                          );
+                          showNotice(c.suggestedFix!.fixLabel);
                         }}
-                        className="p-2.5 rounded border mono text-xs"
+                        className="btn pos shrink-0 text-xs py-1.5 px-3"
                       >
-                        {transformSummary}
-                      </div>
+                        Исправить
+                      </button>
                     )}
                   </div>
-                </div>
+                ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL 2: Предложения (Отдельный попап)
+         ================================================================= */}
+      {aiActiveModal === 'proposals' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
+          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="panel-header">
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('hub')}
+                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
+                  title="Вернуться к выбору разделов"
+                >
+                  <ArrowLeft size={13} />
+                  <span>К разделам</span>
+                </button>
+                <div
+                  className="flex items-center gap-1.5 text-xs font-bold"
+                  style={{ color: 'var(--ctx-pos-text)' }}
+                >
+                  <Lightbulb size={15} />
+                  <span>Предложения ({proposals.length})</span>
+                </div>
+                <span className="pill text-[10px]">
+                  Контекст:{' '}
+                  {aiContextIds.length > 0
+                    ? aiContextIds.join(', ')
+                    : 'Весь проект'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiActiveModal(null)}
+                className="btn py-1 px-2.5"
+              >
+                Закрыть
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3">
+              {proposals.length === 0 ? (
+                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
+                  Нет активных предложений для текущего контекста элементов.
+                </div>
+              ) : (
+                proposals.map((prop) => (
+                  <div
+                    key={prop.id}
+                    className="p-3.5 border border-[var(--border)] rounded-lg bg-[var(--bg)] flex items-center justify-between gap-4"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="text-xs font-semibold text-[var(--ink)]">
+                        {prop.title}
+                      </div>
+                      <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
+                        {prop.rationale}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleApplyProposal(prop)}
+                        className="btn pos text-xs py-1.5 px-3"
+                      >
+                        Применить
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRejectProposalModal(prop)}
+                        className="btn neg text-xs py-1.5 px-3"
+                      >
+                        Отклонить
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL 3: Проблемное интервью (Отдельный попап)
+         ================================================================= */}
+      {aiActiveModal === 'interview' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
+          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="panel-header">
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('hub')}
+                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
+                  title="Вернуться к выбору разделов"
+                >
+                  <ArrowLeft size={13} />
+                  <span>К разделам</span>
+                </button>
+                <div
+                  className="flex items-center gap-1.5 text-xs font-bold"
+                  style={{ color: 'var(--accent)' }}
+                >
+                  <MessageSquare size={15} />
+                  <span>Проблемное интервью ({interviewQuestions.length})</span>
+                </div>
+                <span className="pill text-[10px]">
+                  Контекст:{' '}
+                  {aiContextIds.length > 0
+                    ? aiContextIds.join(', ')
+                    : 'Весь проект'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiActiveModal(null)}
+                className="btn py-1 px-2.5"
+              >
+                Закрыть
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3.5">
+              {interviewQuestions.length === 0 ? (
+                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
+                  Вопросы для интервью отсутствуют.
+                </div>
+              ) : (
+                interviewQuestions.map((q) => (
+                  <div
+                    key={q.id}
+                    className="p-4 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2.5"
+                  >
+                    <div className="text-xs font-semibold text-[var(--ink)]">
+                      {q.question}
+                    </div>
+                    <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
+                      {q.weakSpotContext}
+                    </div>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {q.quickOptions.map((opt, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => {
+                            if (q.targetElementId) {
+                              setElements((prev) =>
+                                prev.map((el) =>
+                                  el.id === q.targetElementId
+                                    ? {
+                                        ...el,
+                                        description: `${el.description} [Правило: ${opt}]`,
+                                      }
+                                    : el
+                                )
+                              );
+                            }
+                            showNotice(`Ответ записан в ${q.targetElementId}`);
+                          }}
+                          className="btn text-xs py-1.5 px-2.5"
+                        >
+                          → {opt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL 4: Преобразование элемента (Отдельный попап)
+         ================================================================= */}
+      {aiActiveModal === 'transform' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
+          <div className="w-full max-w-2xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="panel-header">
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setAiActiveModal('hub')}
+                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
+                  title="Вернуться к выбору разделов"
+                >
+                  <ArrowLeft size={13} />
+                  <span>К разделам</span>
+                </button>
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ink)]">
+                  <Workflow size={15} />
+                  <span>Преобразование элемента</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiActiveModal(null)}
+                className="btn py-1 px-2.5"
+              >
+                Закрыть
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4">
+              <div className="p-4 border border-[var(--border)] rounded-xl bg-[var(--bg)] space-y-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="label block mb-1">
+                      Исходный элемент плана
+                    </label>
+                    <select
+                      value={transformSourceId}
+                      onChange={(e) => setTransformSourceId(e.target.value)}
+                      className="sys-input w-full mono text-xs"
+                    >
+                      {elements.map((el) => (
+                        <option key={el.id} value={el.id}>
+                          {el.id} — {el.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label block mb-1">
+                      Шаблон развёртывания
+                    </label>
+                    <select
+                      value={transformPattern}
+                      onChange={(e) =>
+                        setTransformPattern(
+                          e.target.value as
+                            | 'system_pack'
+                            | 'class_hierarchy'
+                            | 'process_chain'
+                        )
+                      }
+                      className="sys-input w-full text-xs"
+                    >
+                      <option value="system_pack">
+                        Система + Компонент + Класс
+                      </option>
+                      <option value="class_hierarchy">
+                        Класс + эталонный Объект (instance_of)
+                      </option>
+                      <option value="process_chain">
+                        Пошаговая Процесс-функция
+                      </option>
+                    </select>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const src =
+                      elements.find((e) => e.id === transformSourceId) ||
+                      elements[0];
+                    if (!src) return;
+                    const res = generateLocalTransformation(
+                      src,
+                      transformPattern
+                    );
+                    setElements((prev) => {
+                      const existingIds = new Set(prev.map((x) => x.id));
+                      const fresh = res.createdElements.filter(
+                        (x) => !existingIds.has(x.id)
+                      );
+                      return [...prev, ...fresh];
+                    });
+                    setUncommittedChanges((c) => c + 1);
+                    setTransformSummary(res.summary);
+                    showNotice(res.summary);
+                  }}
+                  className="btn pos text-xs py-2 px-4"
+                >
+                  Развернуть и добавить на Холст
+                </button>
+                {transformSummary && (
+                  <div
+                    style={{
+                      borderColor: 'var(--ctx-pos-border)',
+                      backgroundColor: 'var(--ctx-pos-soft)',
+                      color: 'var(--ctx-pos-text)',
+                    }}
+                    className="p-3 rounded-lg border mono text-xs leading-relaxed"
+                  >
+                    {transformSummary}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -7041,6 +8662,513 @@ export function App() {
                 className="btn neg flex-1"
               >
                 {t.confirmNo}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          CONTEXT MENU: Knowledge Base File Explorer
+         ================================================================= */}
+      {kbContextMenu && (
+        <div
+          style={{
+            top: `${kbContextMenu.y}px`,
+            left: `${kbContextMenu.x}px`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          className="fixed z-50 min-w-[220px] max-w-[270px] py-1 bg-[var(--surface)] text-[var(--ink)] border border-[var(--border)] rounded-lg shadow-2xl text-xs select-none backdrop-blur-md animate-in fade-in zoom-in-95 duration-75"
+        >
+          {/* Target header tag */}
+          <div className="px-3 py-1.5 border-b border-[var(--border)] text-[10px] mono text-[var(--ink-muted)] flex items-center justify-between gap-1.5 bg-[var(--surface-hover)]">
+            <span className="truncate">
+              {kbContextMenu.target.type === 'file'
+                ? `Файл: ${kbContextMenu.target.fileName}`
+                : kbContextMenu.target.type === 'element'
+                ? `Узел: ${kbContextMenu.target.elementId}`
+                : kbContextMenu.target.type === 'folder'
+                ? `Папка: ${kbContextMenu.target.folderName}/`
+                : `Проект: ${projectRootFolder}/`}
+            </span>
+            {isItemStarred(kbContextMenu.target) && (
+              <Star
+                size={11}
+                style={{
+                  color: 'var(--ctx-neg-text)',
+                  fill: 'var(--ctx-neg-text)',
+                }}
+                className="shrink-0"
+              />
+            )}
+          </div>
+
+          {kbContextMenu.target.type === 'empty' ? (
+            /* Context menu on empty area */
+            <div className="p-1 space-y-0.5">
+              {/* Создать новый... -> Submenu */}
+              <div
+                className="relative group px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] cursor-pointer flex items-center justify-between text-xs transition-colors"
+                onMouseEnter={() => setKbSubmenuOpen(true)}
+                onMouseLeave={() => setKbSubmenuOpen(false)}
+              >
+                <div className="flex items-center gap-2">
+                  <Plus size={14} className="text-[var(--accent)]" />
+                  <span>Создать новый...</span>
+                </div>
+                <ChevronRight size={12} className="text-[var(--ink-muted)]" />
+
+                {kbSubmenuOpen && (
+                  <div className="absolute left-[96%] top-0 min-w-[160px] py-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg shadow-2xl z-50 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKbContextMenu(null);
+                        handleOpenNewResource('file');
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
+                    >
+                      <FilePlus size={13} className="text-[var(--accent)]" />
+                      <span>Файл (.pgr)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKbContextMenu(null);
+                        handleOpenNewResource('folder');
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
+                    >
+                      <FolderPlus size={13} className="text-[var(--accent)]" />
+                      <span>Каталог (папка)</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setKbContextMenu(null);
+                  handleCollapseAll();
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <ChevronRight size={14} className="text-[var(--ink-muted)]" />
+                <span>Свернуть все</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setKbContextMenu(null);
+                  handleExpandAll();
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <ChevronDown size={14} className="text-[var(--ink-muted)]" />
+                <span>Развернуть все</span>
+              </button>
+
+              <div className="border-t border-[var(--border)] my-1" />
+
+              <button
+                type="button"
+                onClick={() => {
+                  setKbContextMenu(null);
+                  handleShowInExplorer({ type: 'empty' });
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <Folder size={14} className="text-[var(--accent)]" />
+                <span>Показать в Проводнике</span>
+              </button>
+            </div>
+          ) : (
+            /* Context menu on file / element / folder */
+            <div className="p-1 space-y-0.5">
+              {/* Создать новый... -> Submenu */}
+              <div
+                className="relative group px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] cursor-pointer flex items-center justify-between text-xs transition-colors"
+                onMouseEnter={() => setKbSubmenuOpen(true)}
+                onMouseLeave={() => setKbSubmenuOpen(false)}
+              >
+                <div className="flex items-center gap-2">
+                  <Plus size={14} className="text-[var(--accent)]" />
+                  <span>Создать новый...</span>
+                </div>
+                <ChevronRight size={12} className="text-[var(--ink-muted)]" />
+
+                {kbSubmenuOpen && (
+                  <div className="absolute left-[96%] top-0 min-w-[160px] py-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg shadow-2xl z-50 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKbContextMenu(null);
+                        const parentFolder =
+                          kbContextMenu.target.type === 'folder'
+                            ? kbContextMenu.target.folderName
+                            : kbContextMenu.target.type === 'file' &&
+                              kbContextMenu.target.fileName.includes('/')
+                            ? kbContextMenu.target.fileName.split('/')[0]
+                            : undefined;
+                        handleOpenNewResource('file', parentFolder);
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
+                    >
+                      <FilePlus size={13} className="text-[var(--accent)]" />
+                      <span>Файл (.pgr)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKbContextMenu(null);
+                        handleOpenNewResource('folder');
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
+                    >
+                      <FolderPlus size={13} className="text-[var(--accent)]" />
+                      <span>Каталог (папка)</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Переименовать */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleStartRename(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <Edit2 size={14} className="text-[var(--ink-muted)]" />
+                <span>Переименовать</span>
+              </button>
+
+              {/* Удалить (только для файла) */}
+              {kbContextMenu.target.type === 'file' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fileName =
+                      kbContextMenu.target.type === 'file'
+                        ? kbContextMenu.target.fileName
+                        : '';
+                    setKbContextMenu(null);
+                    handleDeleteFile(fileName);
+                  }}
+                  className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)] flex items-center gap-2 text-xs cursor-pointer transition-colors"
+                >
+                  <Trash2 size={14} className="text-[var(--ctx-neg-text)]" />
+                  <span>Удалить</span>
+                </button>
+              )}
+
+              {/* Вырезать */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleCut(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center justify-between text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Scissors size={14} className="text-[var(--ink-muted)]" />
+                  <span>Вырезать</span>
+                </div>
+                <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+X</span>
+              </button>
+
+              {/* Скопировать */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleCopy(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center justify-between text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Copy size={14} className="text-[var(--ink-muted)]" />
+                  <span>Скопировать</span>
+                </div>
+                <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+C</span>
+              </button>
+
+              {/* Вставить (если что-то уже скопировано или вырезано) */}
+              <button
+                type="button"
+                disabled={!kbClipboard}
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handlePaste(target);
+                }}
+                className={`w-full text-left px-2.5 py-1.5 rounded flex items-center justify-between text-xs transition-colors ${
+                  kbClipboard
+                    ? 'hover:bg-[var(--surface-hover)] text-[var(--ink)] cursor-pointer'
+                    : 'opacity-40 cursor-not-allowed text-[var(--ink-muted)]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Clipboard size={14} className="text-[var(--ink-muted)]" />
+                  <span>
+                    Вставить
+                    {kbClipboard ? ` (${kbClipboard.mode === 'cut' ? 'вырез.' : 'копия'})` : ''}
+                  </span>
+                </div>
+                <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+V</span>
+              </button>
+
+              {/* Дублировать */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleDuplicate(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <CopyPlus size={14} className="text-[var(--ink-muted)]" />
+                <span>Дублировать</span>
+              </button>
+
+              <div className="border-t border-[var(--border)] my-1" />
+
+              {/* Показать в Проводнике */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleShowInExplorer(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <Folder size={14} className="text-[var(--accent)]" />
+                <span>Показать в Проводнике</span>
+              </button>
+
+              {/* Отметить как важное / Снять отметку */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleToggleImportant(target);
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                {isItemStarred(kbContextMenu.target) ? (
+                  <>
+                    <StarOff
+                      size={14}
+                      style={{ color: 'var(--ctx-neg-text)' }}
+                      className="shrink-0"
+                    />
+                    <span>Снять отметку</span>
+                  </>
+                ) : (
+                  <>
+                    <Star
+                      size={14}
+                      style={{
+                        color: 'var(--ctx-neg-text)',
+                        fill: 'var(--ctx-neg-text)',
+                      }}
+                      className="shrink-0"
+                    />
+                    <span>Отметить как важное</span>
+                  </>
+                )}
+              </button>
+
+              <div className="border-t border-[var(--border)] my-1" />
+
+              {/* Скопировать относительный путь */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleCopyPath(target, 'relative');
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <Link size={14} className="text-[var(--ink-muted)]" />
+                <span>Скопировать относительный путь</span>
+              </button>
+
+              {/* Скопировать путь */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = kbContextMenu.target;
+                  setKbContextMenu(null);
+                  handleCopyPath(target, 'full');
+                }}
+                className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
+              >
+                <Link size={14} className="text-[var(--accent)]" />
+                <span>Скопировать путь</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL: Rename File or Element
+         ================================================================= */}
+      {renameModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
+            <div className="section-title">
+              <span>
+                {renameModal.type === 'file'
+                  ? 'Переименовать файл'
+                  : 'Переименовать элемент'}
+              </span>
+            </div>
+            <div className="mono text-xs text-[var(--ink-muted)]">
+              Текущее имя: <code>{renameModal.currentName}</code>
+            </div>
+            <input
+              type="text"
+              placeholder={
+                renameModal.type === 'file'
+                  ? 'Новое имя файла (e.g. sys_new.pgr)...'
+                  : 'Новый ID элемента...'
+              }
+              value={renameModal.newName}
+              onChange={(e) =>
+                setRenameModal((prev) =>
+                  prev ? { ...prev, newName: e.target.value } : null
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleConfirmRename();
+                if (e.key === 'Escape') setRenameModal(null);
+              }}
+              autoFocus
+              className="sys-input w-full mono"
+            />
+            <div className="btn-group">
+              <button
+                type="button"
+                onClick={handleConfirmRename}
+                className="btn pos flex-1"
+              >
+                Сохранить
+              </button>
+              <button
+                type="button"
+                onClick={() => setRenameModal(null)}
+                className="btn neg flex-1"
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL: Create New File / Folder Resource
+         ================================================================= */}
+      {newResourceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
+            <div className="section-title">
+              <span>
+                {newResourceModal.type === 'file'
+                  ? 'Создать новый файл .pgr'
+                  : 'Создать новый каталог (папку)'}
+              </span>
+            </div>
+            {newResourceModal.parentFolder && (
+              <div className="mono text-xs text-[var(--ink-muted)]">
+                В каталоге: <code>{newResourceModal.parentFolder}/</code>
+              </div>
+            )}
+            <input
+              type="text"
+              placeholder={
+                newResourceModal.type === 'file'
+                  ? 'Имя файла (e.g. sys_module_2.pgr)...'
+                  : 'Имя папки (e.g. systems, core, entities)...'
+              }
+              value={newResourceModal.name}
+              onChange={(e) =>
+                setNewResourceModal((prev) =>
+                  prev ? { ...prev, name: e.target.value } : null
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateResourceConfirm();
+                if (e.key === 'Escape') setNewResourceModal(null);
+              }}
+              autoFocus
+              className="sys-input w-full mono"
+            />
+            <div className="btn-group">
+              <button
+                type="button"
+                onClick={handleCreateResourceConfirm}
+                className="btn pos flex-1"
+              >
+                Создать
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewResourceModal(null)}
+                className="btn neg flex-1"
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          MODAL: Delete File Confirmation
+         ================================================================= */}
+      {deleteFileConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
+            <div className="section-title text-[var(--ctx-neg-text)]">
+              <span>Удаление файла</span>
+            </div>
+            <div className="text-xs">
+              Вы действительно хотите удалить файл <code>{deleteFileConfirm}</code>?
+              <br />
+              <span className="text-[var(--ink-muted)]">
+                Все элементы, привязанные к этому файлу, также будут удалены.
+              </span>
+            </div>
+            <div className="btn-group">
+              <button
+                type="button"
+                onClick={handleConfirmDeleteFile}
+                className="btn neg flex-1"
+              >
+                Удалить файл
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteFileConfirm(null)}
+                className="btn flex-1"
+              >
+                Отмена
               </button>
             </div>
           </div>

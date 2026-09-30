@@ -151,3 +151,13 @@ export type PositivePaletteKey = 'emerald' | 'violet' | 'sapphire' | 'teal' | 'a
 export type NegativePaletteKey = 'crimson' | 'rose' | 'ochre' | 'slate' | 'indigo';
 
 export type LocaleKey = 'ru' | 'en';
+
+export type AiProviderType = 'gemini' | 'custom';
+
+export interface AiProviderConfig {
+  provider: AiProviderType;
+  geminiModel: 'gemini-3-flash-preview' | 'gemini-3.1-flash-lite-preview' | 'gemini-3.1-pro-preview' | 'gemini-flash-latest';
+  customEndpoint: string;
+  customModel: string;
+}
+
