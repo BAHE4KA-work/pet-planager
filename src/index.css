@@ -417,6 +417,7 @@ body,
   max-width: 100%;
   margin: 0 auto;
   width: 100%;
+  container-type: inline-size;
   transition: padding 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -430,8 +431,9 @@ body,
 }
 
 .title-display {
+  display: block;
   font-family: 'Syne', sans-serif;
-  font-size: 2.5rem;
+  font-size: clamp(1.5rem, 5cqi, 2.5rem);
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.02;
@@ -440,7 +442,17 @@ body,
   background: transparent;
   border: none;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  resize: none;
+  padding: 0;
   outline: none;
+}
+
+.element-title-display {
+  font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 /* Field Grid with 1px hairline dividers */
@@ -491,7 +503,8 @@ body,
 .field-value textarea:not(.sys-input) {
   line-height: 1.6;
   color: var(--ink);
-  resize: vertical;
+  resize: none;
+  overflow: hidden;
 }
 
 .identity-grid {

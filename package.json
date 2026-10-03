@@ -4,27 +4,29 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "vite --host localhost",
+    "tauri": "tauri",
+    "dev:desktop": "tauri dev",
     "build": "vite build",
-    "start": "node --import tsx server.ts",
-    "lint": "tsc --noEmit"
+    "build:desktop": "tauri build --no-bundle",
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:native": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
-    "@google/genai": "^1.19.0",
     "@tailwindcss/vite": "^4.1.13",
-    "express": "^4.21.2",
+    "@tauri-apps/api": "2.11.1",
     "lucide-react": "^0.544.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.1.13"
   },
   "devDependencies": {
-    "@types/express": "^5.0.0",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "^22.14.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "tsx": "^4.19.3",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

@@ -87,8 +87,8 @@ export interface GitCommit {
   message: string;
   timestamp: string;
   author: string;
-  filesSnapshot: Record<string, string>; // fileName -> .pgr content
-  elementsSnapshot: PlanElement[];
+  filesSnapshot?: Record<string, string>; // available when an offline preview snapshot is explicitly shown
+  elementsSnapshot?: PlanElement[];
 }
 
 export interface DiffLine {
@@ -102,6 +102,7 @@ export interface UnitLibraryItem {
   unitId: string;
   category: string;
   savedAt: string;
+  iconName?: string;
   element: Omit<PlanElement, 'fileName' | 'position'>;
 }
 
@@ -147,17 +148,31 @@ export interface AiInterviewQuestion {
 
 export type ThemeMode = 'dark' | 'classic' | 'light' | 'system';
 
-export type PositivePaletteKey = 'emerald' | 'violet' | 'sapphire' | 'teal' | 'amber';
-export type NegativePaletteKey = 'crimson' | 'rose' | 'ochre' | 'slate' | 'indigo';
+export type PaletteKey = 'emerald' | 'violet' | 'sapphire' | 'teal' | 'amber' | 'crimson' | 'rose' | 'ochre' | 'slate' | 'indigo';
+export type PositivePaletteKey = PaletteKey;
+export type NegativePaletteKey = PaletteKey;
 
 export type LocaleKey = 'ru' | 'en';
 
-export type AiProviderType = 'gemini' | 'custom';
+export type AiProviderType = 'gemini' | 'custom' | 'chatgpt';
+export type GeminiModel =
+  | 'gemini-3.8-flash'
+  | 'gemini-3.7-flash'
+  | 'gemini-3.6-flash'
+  | 'gemini-3.5-flash'
+  | 'gemini-3.5-flash-lite'
+  | 'gemini-3.1-flash-lite'
+  | 'gemini-3.1-pro-preview'
+  | 'gemini-3-flash-preview'
+  | 'gemini-flash-latest'
+  | 'gemma-4-31b-it'
+  | 'gemma-4-26b-a4b-it';
 
 export interface AiProviderConfig {
   provider: AiProviderType;
-  geminiModel: 'gemini-3-flash-preview' | 'gemini-3.1-flash-lite-preview' | 'gemini-3.1-pro-preview' | 'gemini-flash-latest';
+  geminiModel: GeminiModel;
   customEndpoint: string;
   customModel: string;
+  chatgptModel: string;
 }
 

@@ -1,10 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   AlertTriangle,
-  ArrowLeft,
   Activity,
   BarChart2,
-  Blocks,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -12,20 +11,15 @@ import {
   Clock,
   Copy,
   CopyPlus,
-  Diamond,
   Edit2,
   FilePlus,
   FileText,
-  Focus,
   Folder,
   FolderPlus,
   Funnel,
   Gauge,
-  Group,
-  Lightbulb,
   Link,
   Maximize2,
-  MessageSquare,
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -38,15 +32,15 @@ import {
   Star,
   StarOff,
   Trash2,
-  Workflow,
   Zap,
 } from 'lucide-react';
 import {
   AiContradiction,
   AiInterviewQuestion,
   AiProposalCard,
+  AiProviderConfig,
+  AiProviderType,
   ElementType,
-  GitCommit,
   LocaleKey,
   NegativePaletteKey,
   PlanElement,
@@ -55,17 +49,33 @@ import {
   ThemeMode,
   UnitLibraryItem,
 } from './types/planager';
-import {
-  I18N_DICTIONARY,
-  INITIAL_ELEMENTS,
-  INITIAL_FILES,
-  INITIAL_UNIT_LIBRARY,
-  NEGATIVE_PALETTES,
-  POSITIVE_PALETTES,
-} from './data/initialProject';
+import { NEGATIVE_PALETTES, POSITIVE_PALETTES } from './data/palettes';
+import { DEFAULT_GEMINI_MODEL } from './data/aiModels';
+import { I18N_DICTIONARY } from './data/translations';
+import { useWorkspace } from './hooks/useWorkspace';
+import { applyCanvasAutoLayout, computeClusteredGraphPositions, stripElementPrefix } from './hooks/canvasLayout';
+import { AiChangeReviewDialog } from './components/AiChangeReviewDialog';
+import { KnowledgeAiSidebar } from './components/KnowledgeAiSidebar';
+import { ElementAttributesPanel } from './components/ElementAttributesPanel';
+import { StructuredElementFields } from './components/StructuredElementFields';
+import { AutoGrowTextarea } from './components/AutoGrowTextarea';
+import { AppHeader, type PrimaryTab } from './components/AppHeader';
+import { ExplorerFileEntry, type KbContextMenuTarget } from './components/ExplorerFileEntry';
+import { ELEMENT_TYPE_ICONS } from './components/ElementTypeIcon';
+import { NativeGitView } from './components/NativeGitView';
+import { Dialog } from './components/ui/Dialog';
+import type { AiTransformPattern, AiWorkflowModal } from './components/AiWorkflowDialogs';
+import { analyze, applyInterviewAnswer, interview, testProvider, transform } from './services/ai';
+import { loadSettings, loadUnitLibrary, saveSettings, saveUnitLibrary, type AppSettings } from './services/settings';
+import { useUsageLedger } from './hooks/useUsageLedger';
+import { useGitWorkspace } from './hooks/useGitWorkspace';
+import { isDesktop, desktopInvoke } from './services/desktop';
+import { revealWorkspacePath } from './services/workspace';
+import { connectChatGpt, disconnectChatGpt, forgetChatGpt, getChatGptStatus, loadChatGptModels, type ChatGptModel } from './services/chatgptOAuth';
+import { cloneElements, deleteElements, moveElementsToFile, renameElementId, renameFileElements } from './hooks/projectOperations';
+import { prepareLibraryInsert } from './hooks/libraryOperations';
 import {
   buildAndValidateGraph,
-  computeLineDiff,
   parsePgrFileContent,
   resolveInheritedFieldsForObject,
   serializeFileWithRanges,
@@ -73,598 +83,34 @@ import {
   TYPE_PREFIXES,
 } from './utils/pgrCodec';
 import {
-  buildRagIndex,
-  generateLocalAnalysis,
-  generateLocalInterviewQuestions,
-  generateLocalTransformation,
+  inspectGraphSchemaIssues,
 } from './utils/aiEngine';
+import { localizedText } from './utils/localization';
+import { localizePgrParseError } from './utils/pgrErrorLocalization';
+import { parseLineRange } from './utils/lineRange';
+import { defaultLibraryIcon } from './utils/libraryIcons';
+import { getParallelEdgeOffsets, offsetGraphLine } from './utils/graphGeometry';
+import { toggleCanvasRelation } from './utils/canvasRelations';
+import { interviewAnswersForContext, readSavedInterviewAnswers, saveInterviewAnswer } from './utils/interviewAnswers';
 
-type PrimaryTab = 'kb' | 'canvas' | 'library' | 'settings';
+const SettingsView = React.lazy(() => import('./components/SettingsView').then(({ SettingsView: component }) => ({ default: component })));
+const CanvasWorkspaceView = React.lazy(() => import('./components/CanvasWorkspaceView').then(({ CanvasWorkspaceView: component }) => ({ default: component })));
+const PgrSourceEditor = React.lazy(() => import('./components/PgrSourceEditor').then(({ PgrSourceEditor: component }) => ({ default: component })));
+const UnitLibraryView = React.lazy(() => import('./components/UnitLibraryView').then(({ UnitLibraryView: component }) => ({ default: component })));
+const LibraryIconPicker = React.lazy(() => import('./components/LibraryIconPicker').then(({ LibraryIconPicker: component }) => ({ default: component })));
+const AiWorkflowDialogs = React.lazy(() => import('./components/AiWorkflowDialogs').then(({ AiWorkflowDialogs: component }) => ({ default: component })));
 
-const ELEMENT_TYPE_ICONS: Record<
-  ElementType,
-  React.ComponentType<{ size?: number; className?: string }>
-> = {
-  system: Blocks,
-  class: Group,
-  object: Focus,
-  component: Diamond,
-  process: Workflow,
-  idea: Lightbulb,
-};
-
-function stripElementPrefix(id: string): string {
-  return id.replace(/^(sys|cls|obj|cmp|proc|idea)_/, '');
+const EMPTY_METADATA_IDS: string[] = [];
+const readMetadataIds = (value: unknown): string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value as string[]
+    : EMPTY_METADATA_IDS;
+interface KbClipboardItem {
+  mode: 'cut' | 'copy';
+  type: 'file' | 'folder' | 'element';
+  id: string;
+  sourceFileName?: string;
 }
-
-function createSnapshotMap(
-  elements: PlanElement[],
-  files: string[]
-): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const f of files) {
-    map[f] = serializeFileWithRanges(elements, f).content;
-  }
-  return map;
-}
-
-// Shared topology-aware layout generator that keeps tightly coupled nodes in the core
-// and pushes peripheral radicals / secondary sub-clusters (like join_faction -> factions + reputation_bound) outward
-function computeClusteredGraphPositions(
-  nodes: PlanElement[],
-  activeEdges: ReturnType<typeof buildAndValidateGraph>['edges'],
-  W: number,
-  H: number,
-  baseScale: number,
-  spread: number,
-  preferredAnchorId?: string | null,
-  lockedCenters?: Record<string, { x: number; y: number }>
-): Record<string, { x: number; y: number }> {
-  const cx = W / 2;
-  const cy = H / 2;
-  const scale = baseScale * spread;
-  const posMap: Record<string, { x: number; y: number }> = {};
-  if (nodes.length === 0) return posMap;
-
-  const nodeMap = new Map<string, PlanElement>();
-  nodes.forEach((n) => nodeMap.set(n.id, n));
-
-  const adj: Record<string, Set<string>> = {};
-  nodes.forEach((n) => {
-    adj[n.id] = new Set<string>();
-  });
-  activeEdges.forEach((e) => {
-    if (adj[e.source] && adj[e.target] && e.source !== e.target) {
-      adj[e.source].add(e.target);
-      adj[e.target].add(e.source);
-    }
-  });
-
-  const getClusterRoot = (el: PlanElement): string => {
-    if (el.type === 'system') return el.id;
-    if (el.parent && el.parent !== '-') return el.parent;
-    if (el.altTo && el.altTo !== '-') return el.altTo;
-    return el.fileName;
-  };
-
-  // Determine anchor node (preferredAnchorId if present, else highest-degree node)
-  let anchorId =
-    preferredAnchorId && nodeMap.has(preferredAnchorId)
-      ? preferredAnchorId
-      : nodes[0].id;
-  if (!preferredAnchorId || !nodeMap.has(preferredAnchorId)) {
-    let bestDeg = -1;
-    nodes.forEach((n) => {
-      const deg = adj[n.id]?.size || 0;
-      if (deg > bestDeg) {
-        bestDeg = deg;
-        anchorId = n.id;
-      }
-    });
-  }
-
-  const anchorEl = nodeMap.get(anchorId)!;
-  const anchorCluster = getClusterRoot(anchorEl);
-
-  // BFS hop distance from anchorId
-  const hopDist: Record<string, number> = {};
-  nodes.forEach((n) => {
-    hopDist[n.id] = Infinity;
-  });
-  hopDist[anchorId] = 0;
-  const queue: string[] = [anchorId];
-  while (queue.length > 0) {
-    const curr = queue.shift()!;
-    const d = hopDist[curr];
-    adj[curr].forEach((nb) => {
-      if (hopDist[nb] === Infinity) {
-        hopDist[nb] = d + 1;
-        queue.push(nb);
-      }
-    });
-  }
-
-  // Identify Core Cluster vs Peripheral Radicals
-  const sameSystemSet = new Set<string>();
-  nodes.forEach((n) => {
-    if (getClusterRoot(n) === anchorCluster) {
-      sameSystemSet.add(n.id);
-    }
-  });
-
-  const coreSet = new Set<string>([anchorId]);
-  nodes.forEach((n) => {
-    if (n.id === anchorId) return;
-    if (hopDist[n.id] > 2) return;
-    const inSameSystem = sameSystemSet.has(n.id);
-    let linksToSameSystem = 0;
-    let linksToExternal = 0;
-    adj[n.id].forEach((nb) => {
-      if (sameSystemSet.has(nb)) linksToSameSystem++;
-      else linksToExternal++;
-    });
-
-    if (inSameSystem) {
-      coreSet.add(n.id);
-    } else if (linksToSameSystem >= 2 && linksToExternal === 0) {
-      coreSet.add(n.id);
-    }
-  });
-
-  if (coreSet.size === 1) {
-    adj[anchorId].forEach((nb) => coreSet.add(nb));
-  }
-
-  const visitedNonCore = new Set<string>();
-  const radicalClusters: {
-    members: string[];
-    bridges: string[];
-    distals: string[];
-    coreAttachments: string[];
-  }[] = [];
-  const isolatedNodes: string[] = [];
-
-  nodes.forEach((n) => {
-    if (coreSet.has(n.id) || visitedNonCore.has(n.id)) return;
-    if (hopDist[n.id] === Infinity) {
-      visitedNonCore.add(n.id);
-      isolatedNodes.push(n.id);
-      return;
-    }
-    const comp: string[] = [];
-    const q: string[] = [n.id];
-    visitedNonCore.add(n.id);
-    while (q.length > 0) {
-      const cur = q.shift()!;
-      comp.push(cur);
-      adj[cur].forEach((nb) => {
-        if (!coreSet.has(nb) && !visitedNonCore.has(nb)) {
-          visitedNonCore.add(nb);
-          q.push(nb);
-        }
-      });
-    }
-
-    const bridges: string[] = [];
-    const distals: string[] = [];
-    const attachSet = new Set<string>();
-    comp.forEach((cid) => {
-      let touchesCore = false;
-      adj[cid].forEach((nb) => {
-        if (coreSet.has(nb)) {
-          touchesCore = true;
-          attachSet.add(nb);
-        }
-      });
-      if (touchesCore) bridges.push(cid);
-      else distals.push(cid);
-    });
-
-    radicalClusters.push({
-      members: comp,
-      bridges,
-      distals,
-      coreAttachments: Array.from(attachSet),
-    });
-  });
-
-  const coreBridgeAttachSet = new Set<string>();
-  radicalClusters.forEach((rc) => {
-    rc.coreAttachments.forEach((id) => coreBridgeAttachSet.add(id));
-  });
-
-  // 1. Place Core Cluster around (cx, cy)
-  posMap[anchorId] = lockedCenters?.[anchorId]
-    ? { ...lockedCenters[anchorId] }
-    : { x: cx, y: cy };
-
-  const coreRing1 = nodes.filter(
-    (n) => n.id !== anchorId && coreSet.has(n.id) && hopDist[n.id] === 1
-  );
-  const coreRing2 = nodes.filter(
-    (n) => n.id !== anchorId && coreSet.has(n.id) && hopDist[n.id] > 1
-  );
-
-  const orderedRing1 = [
-    ...coreRing1.filter((n) => coreBridgeAttachSet.has(n.id)),
-    ...coreRing1.filter((n) => !coreBridgeAttachSet.has(n.id)),
-  ];
-
-  const r1X = 115 * scale;
-  const r1Y = 102 * scale;
-  orderedRing1.forEach((n, idx) => {
-    if (lockedCenters?.[n.id]) {
-      posMap[n.id] = { ...lockedCenters[n.id] };
-      return;
-    }
-    const angle =
-      Math.PI * 0.65 +
-      (2 * Math.PI * idx) / Math.max(1, orderedRing1.length);
-    posMap[n.id] = {
-      x: cx + Math.cos(angle) * r1X,
-      y: cy + Math.sin(angle) * r1Y,
-    };
-  });
-
-  const r2X = (orderedRing1.length > 0 ? 172 : 120) * scale;
-  const r2Y = (orderedRing1.length > 0 ? 148 : 105) * scale;
-  coreRing2.forEach((n, idx) => {
-    if (lockedCenters?.[n.id]) {
-      posMap[n.id] = { ...lockedCenters[n.id] };
-      return;
-    }
-    let sumX = 0;
-    let sumY = 0;
-    let count = 0;
-    adj[n.id].forEach((nb) => {
-      if (posMap[nb] && nb !== anchorId) {
-        sumX += posMap[nb].x - cx;
-        sumY += posMap[nb].y - cy;
-        count++;
-      }
-    });
-    const baseAngle =
-      count > 0
-        ? Math.atan2(sumY / count, sumX / count) +
-          (idx % 2 === 0 ? 1 : -1) * 0.38
-        : -Math.PI / 2 + (2 * Math.PI * idx) / Math.max(1, coreRing2.length);
-    posMap[n.id] = {
-      x: cx + Math.cos(baseAngle) * r2X,
-      y: cy + Math.sin(baseAngle) * r2Y,
-    };
-  });
-
-  // 2. Place Radical Sub-clusters outward along the ray from (cx, cy) through their core attachment node
-  const nodeRadicalGroup: Record<string, number> = {};
-  const isDistalRadical = new Set<string>();
-  const isBridgeRadical = new Set<string>();
-  const radicalOutwardDir: Record<string, { ux: number; uy: number }> = {};
-
-  radicalClusters.forEach((rc, rcIdx) => {
-    let attachX = cx;
-    let attachY = cy;
-    if (rc.coreAttachments.length > 0) {
-      attachX =
-        rc.coreAttachments.reduce(
-          (acc, id) => acc + (posMap[id]?.x ?? cx),
-          0
-        ) / rc.coreAttachments.length;
-      attachY =
-        rc.coreAttachments.reduce(
-          (acc, id) => acc + (posMap[id]?.y ?? cy),
-          0
-        ) / rc.coreAttachments.length;
-    }
-    let dx = attachX - cx;
-    let dy = attachY - cy;
-    let len = Math.hypot(dx, dy);
-    if (len < 1e-3) {
-      const fallbackAngle = Math.PI * 0.28 + rcIdx * 1.1;
-      dx = Math.cos(fallbackAngle);
-      dy = Math.sin(fallbackAngle);
-      len = 1;
-    }
-    const ux = dx / len;
-    const uy = dy / len;
-    const px = -uy;
-    const py = ux;
-
-    rc.members.forEach((mId) => {
-      nodeRadicalGroup[mId] = rcIdx + 1;
-      radicalOutwardDir[mId] = { ux, uy };
-    });
-
-    const bridgeDistFromAttach = 155 * scale;
-    rc.bridges.forEach((bId, bIdx) => {
-      isBridgeRadical.add(bId);
-      if (lockedCenters?.[bId]) {
-        posMap[bId] = { ...lockedCenters[bId] };
-        return;
-      }
-      const lateral = (bIdx - (rc.bridges.length - 1) / 2) * 85 * scale;
-      posMap[bId] = {
-        x: attachX + ux * bridgeDistFromAttach + px * lateral,
-        y: attachY + uy * bridgeDistFromAttach + py * lateral,
-      };
-    });
-
-    const bridgeCenter =
-      rc.bridges.length > 0
-        ? {
-            x:
-              rc.bridges.reduce((a, id) => a + posMap[id].x, 0) /
-              rc.bridges.length,
-            y:
-              rc.bridges.reduce((a, id) => a + posMap[id].y, 0) /
-              rc.bridges.length,
-          }
-        : {
-            x: attachX + ux * bridgeDistFromAttach,
-            y: attachY + uy * bridgeDistFromAttach,
-          };
-
-    const distalStepOut = 135 * scale;
-    const distalSpreadLat = 88 * scale;
-    rc.distals.forEach((dId, dIdx) => {
-      isDistalRadical.add(dId);
-      if (lockedCenters?.[dId]) {
-        posMap[dId] = { ...lockedCenters[dId] };
-        return;
-      }
-      const lateralFactor =
-        rc.distals.length === 1 ? 0 : dIdx - (rc.distals.length - 1) / 2;
-      posMap[dId] = {
-        x:
-          bridgeCenter.x +
-          ux * distalStepOut +
-          px * lateralFactor * distalSpreadLat,
-        y:
-          bridgeCenter.y +
-          uy * distalStepOut +
-          py * lateralFactor * distalSpreadLat,
-      };
-    });
-  });
-
-  // 3. Place completely disconnected / isolated nodes on the outer periphery
-  isolatedNodes.forEach((isoId, idx) => {
-    if (lockedCenters?.[isoId]) {
-      posMap[isoId] = { ...lockedCenters[isoId] };
-      return;
-    }
-    const angle = -Math.PI * 0.78 - idx * 0.55;
-    posMap[isoId] = {
-      x: cx + Math.cos(angle) * 255 * scale,
-      y: cy + Math.sin(angle) * 205 * scale,
-    };
-  });
-
-  // 4. Force relaxation with strong inter-cluster repulsion and outward centrifugal bias for radicals
-  for (let iter = 0; iter < 52; iter++) {
-    const disp: Record<string, { dx: number; dy: number }> = {};
-    nodes.forEach((n) => {
-      disp[n.id] = { dx: 0, dy: 0 };
-    });
-
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i].id;
-        const b = nodes[j].id;
-        const vx = posMap[a].x - posMap[b].x;
-        const vy = posMap[a].y - posMap[b].y;
-        const dist = Math.max(8, Math.hypot(vx, vy));
-
-        const aInCore = coreSet.has(a);
-        const bInCore = coreSet.has(b);
-        const sameRadical =
-          !aInCore &&
-          !bInCore &&
-          nodeRadicalGroup[a] !== undefined &&
-          nodeRadicalGroup[a] === nodeRadicalGroup[b];
-
-        const minSep =
-          aInCore && bInCore
-            ? 122 * scale
-            : sameRadical
-            ? 116 * scale
-            : 205 * scale;
-
-        if (dist < minSep) {
-          const strength = aInCore !== bInCore ? 0.52 : 0.42;
-          const push = ((minSep - dist) / dist) * strength;
-          const weightA =
-            !aInCore && bInCore ? 1.55 : aInCore && !bInCore ? 0.45 : 1;
-          const weightB =
-            !bInCore && aInCore ? 1.55 : bInCore && !aInCore ? 0.45 : 1;
-          disp[a].dx += vx * push * weightA;
-          disp[a].dy += vy * push * weightA;
-          disp[b].dx -= vx * push * weightB;
-          disp[b].dy -= vy * push * weightB;
-        }
-      }
-    }
-
-    activeEdges.forEach((e) => {
-      const a = e.source;
-      const b = e.target;
-      if (!posMap[a] || !posMap[b]) return;
-      const vx = posMap[b].x - posMap[a].x;
-      const vy = posMap[b].y - posMap[a].y;
-      const dist = Math.max(8, Math.hypot(vx, vy));
-
-      const aInCore = coreSet.has(a);
-      const bInCore = coreSet.has(b);
-      const isBridgeEdge = aInCore !== bInCore;
-      const isRadicalInternal = !aInCore && !bInCore;
-
-      const targetDist = isBridgeEdge
-        ? 170 * scale
-        : isRadicalInternal
-        ? 118 * scale
-        : a === anchorId || b === anchorId
-        ? 118 * scale
-        : 135 * scale;
-
-      const pull = ((dist - targetDist) / dist) * 0.14;
-      disp[a].dx += vx * pull;
-      disp[a].dy += vy * pull;
-      disp[b].dx -= vx * pull;
-      disp[b].dy -= vy * pull;
-    });
-
-    nodes.forEach((n) => {
-      const id = n.id;
-      const dir = radicalOutwardDir[id];
-      if (!dir) return;
-      const relX = posMap[id].x - cx;
-      const relY = posMap[id].y - cy;
-      const proj = relX * dir.ux + relY * dir.uy;
-      const minOutwardProj = isDistalRadical.has(id)
-        ? 295 * scale
-        : isBridgeRadical.has(id)
-        ? 195 * scale
-        : 0;
-      if (proj < minOutwardProj) {
-        const boost = (minOutwardProj - proj) * 0.22;
-        disp[id].dx += dir.ux * boost;
-        disp[id].dy += dir.uy * boost;
-      }
-    });
-
-    nodes.forEach((n) => {
-      if (lockedCenters?.[n.id]) {
-        posMap[n.id].x = lockedCenters[n.id].x;
-        posMap[n.id].y = lockedCenters[n.id].y;
-        return;
-      }
-      if (n.id === anchorId) {
-        posMap[n.id].x = cx;
-        posMap[n.id].y = cy;
-        return;
-      }
-      posMap[n.id].x += disp[n.id].dx;
-      posMap[n.id].y += disp[n.id].dy;
-    });
-  }
-
-  return posMap;
-}
-
-// Applies graph-based clustered auto-layout to Canvas elements while keeping any user-moved elements untouched
-function applyCanvasAutoLayout(
-  nodes: PlanElement[],
-  userPositionedIds: Set<string>
-): PlanElement[] {
-  if (nodes.length === 0) return nodes;
-  const { edges: activeEdges } = buildAndValidateGraph(nodes);
-
-  const lockedCenters: Record<string, { x: number; y: number }> = {};
-  nodes.forEach((n) => {
-    if (userPositionedIds.has(n.id)) {
-      lockedCenters[n.id] = {
-        x: n.position.x + 85,
-        y: n.position.y + 30,
-      };
-    }
-  });
-
-  const posMap = computeClusteredGraphPositions(
-    nodes,
-    activeEdges,
-    1020,
-    640,
-    1.58,
-    1.0,
-    null,
-    lockedCenters
-  );
-
-  // Rectangular card-collision avoidance pass so .sys-node cards (~185x75) never overlap on the Canvas
-  const MIN_GAP_X = 225;
-  const MIN_GAP_Y = 112;
-  for (let pass = 0; pass < 28; pass++) {
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i].id;
-        const b = nodes[j].id;
-        const aLocked = userPositionedIds.has(a);
-        const bLocked = userPositionedIds.has(b);
-        if (aLocked && bLocked) continue;
-
-        const dx = posMap[a].x - posMap[b].x;
-        const dy = posMap[a].y - posMap[b].y;
-        const overlapX = MIN_GAP_X - Math.abs(dx);
-        const overlapY = MIN_GAP_Y - Math.abs(dy);
-
-        if (overlapX > 0 && overlapY > 0) {
-          // Push apart along the axis of smaller relative overlap
-          if (overlapX / MIN_GAP_X < overlapY / MIN_GAP_Y) {
-            const signX = dx >= 0 ? 1 : -1;
-            const shift = overlapX * 0.55;
-            if (aLocked) {
-              posMap[b].x -= signX * shift * 2;
-            } else if (bLocked) {
-              posMap[a].x += signX * shift * 2;
-            } else {
-              posMap[a].x += signX * shift;
-              posMap[b].x -= signX * shift;
-            }
-          } else {
-            const signY = dy >= 0 ? 1 : -1;
-            const shift = overlapY * 0.55;
-            if (aLocked) {
-              posMap[b].y -= signY * shift * 2;
-            } else if (bLocked) {
-              posMap[a].y += signY * shift * 2;
-            } else {
-              posMap[a].y += signY * shift;
-              posMap[b].y -= signY * shift;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // If no user-locked nodes exist yet, ensure the bounding box has a clean margin >= 40px from top-left
-  if (userPositionedIds.size === 0) {
-    let minLeft = Infinity;
-    let minTop = Infinity;
-    nodes.forEach((n) => {
-      minLeft = Math.min(minLeft, posMap[n.id].x - 85);
-      minTop = Math.min(minTop, posMap[n.id].y - 30);
-    });
-    const offsetX = minLeft < 40 ? 40 - minLeft : 0;
-    const offsetY = minTop < 40 ? 40 - minTop : 0;
-    if (offsetX > 0 || offsetY > 0) {
-      nodes.forEach((n) => {
-        posMap[n.id].x += offsetX;
-        posMap[n.id].y += offsetY;
-      });
-    }
-  }
-
-  return nodes.map((n) => {
-    if (userPositionedIds.has(n.id)) {
-      return n;
-    }
-    const cx = posMap[n.id]?.x ?? n.position.x + 85;
-    const cy = posMap[n.id]?.y ?? n.position.y + 30;
-    return {
-      ...n,
-      position: {
-        x: Math.max(30, Math.round((cx - 85) / 10) * 10),
-        y: Math.max(30, Math.round((cy - 30) / 10) * 10),
-      },
-    };
-  });
-}
-
-type KbContextMenuTarget =
-  | { type: 'file'; fileName: string }
-  | { type: 'element'; elementId: string; fileName: string }
-  | { type: 'folder'; folderName: string }
-  | { type: 'empty' };
 
 interface KbContextMenuState {
   x: number;
@@ -672,16 +118,9 @@ interface KbContextMenuState {
   target: KbContextMenuTarget;
 }
 
-interface KbClipboardItem {
-  mode: 'cut' | 'copy';
-  type: 'file' | 'element';
-  id: string;
-  sourceFileName?: string;
-}
-
 interface RenameModalState {
   isOpen: boolean;
-  type: 'file' | 'element';
+  type: 'file' | 'folder' | 'element';
   id: string;
   sourceFileName?: string;
   currentName: string;
@@ -696,6 +135,55 @@ interface NewResourceModalState {
 }
 
 export function App() {
+  const workspace = useWorkspace();
+  const workspaceFlushRef = useRef(workspace.flush);
+  const closeGuardRef = useRef(false);
+
+  useEffect(() => { workspaceFlushRef.current = workspace.flush; }, [workspace.flush]);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      if (closeGuardRef.current) return;
+      event.preventDefault();
+      try {
+        await workspaceFlushRef.current();
+        closeGuardRef.current = true;
+        await getCurrentWindow().close();
+      } catch (cause) {
+        showNotice(`${tx('Не удалось сохранить проект перед закрытием', 'Could not save the project before closing')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((cause) => showNotice(`${tx('Не удалось подключить защиту сохранения', 'Could not enable save protection')}: ${String(cause)}`));
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+  const {
+    files, setFiles, elements, setElements,
+    directories: customFolders, setDirectories: setCustomFolders,
+    root: projectRoot, setRoot: setProjectRoot,
+    metadata: workspaceMetadata, setMetadata: setWorkspaceMetadata,
+    renameSourcePath, renameFolderPath, copySourcePath, removeSourcePath,
+  } = workspace;
+  const updateMetadataIds = (key: string, action: React.SetStateAction<string[]>) => {
+    setWorkspaceMetadata((previous) => {
+      const current = readMetadataIds(previous[key]);
+      const next = typeof action === 'function' ? action(current) : action;
+      return { ...previous, [key]: [...next] };
+    });
+  };
+  const starredItems = useMemo(() => new Set(readMetadataIds(workspaceMetadata.favorites)), [workspaceMetadata.favorites]);
+  const savedInterviewAnswers = useMemo(
+    () => readSavedInterviewAnswers(workspaceMetadata.interviewAnswers),
+    [workspaceMetadata.interviewAnswers]
+  );
+  const setStarredItems: React.Dispatch<React.SetStateAction<Set<string>>> = (action) => {
+    updateMetadataIds('favorites', (current) => [...(typeof action === 'function' ? action(new Set(current)) : action)]);
+  };
+  const projectRootFolder = projectRoot || 'Project';
   const [activeTab, setActiveTab] = useState<PrimaryTab>('kb');
   const [leftPanelOpen, setLeftPanelOpen] = useState<boolean>(true);
   const [rightPanelOpen, setRightPanelOpen] = useState<boolean>(true);
@@ -705,20 +193,15 @@ export function App() {
     useState<KbContextMenuState | null>(null);
   const [kbSubmenuOpen, setKbSubmenuOpen] = useState<boolean>(false);
   const [kbClipboard, setKbClipboard] = useState<KbClipboardItem | null>(null);
-  const [starredItems, setStarredItems] = useState<Set<string>>(
-    () => new Set(['cls_item', 'sys_inventory.pgr'])
-  );
   const [renameModal, setRenameModal] = useState<RenameModalState | null>(null);
   const [newResourceModal, setNewResourceModal] =
     useState<NewResourceModalState | null>(null);
   const [deleteFileConfirm, setDeleteFileConfirm] = useState<string | null>(
     null
   );
+  const [deleteFolderConfirm, setDeleteFolderConfirm] = useState<string | null>(null);
 
   // Project files & elements (immediately initialized in graph-clustered auto-layout)
-  const [projectRootFolder, setProjectRootFolder] =
-    useState<string>('example');
-  const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [collapsedFolders, setCollapsedFolders] = useState<
     Record<string, boolean>
   >({});
@@ -728,17 +211,14 @@ export function App() {
   const [isCreatingFolder, setIsCreatingFolder] = useState<boolean>(false);
   const [newFolderName, setNewFolderName] = useState<string>('');
 
-  const [files, setFiles] = useState<string[]>(INITIAL_FILES);
-  const [elements, setElements] = useState<PlanElement[]>(() =>
-    applyCanvasAutoLayout(INITIAL_ELEMENTS, new Set())
-  );
-  const [userPositionedNodeIds, setUserPositionedNodeIds] = useState<
-    Set<string>
-  >(() => new Set());
+  const userPositionedNodeIds = useMemo(() => new Set(readMetadataIds(workspaceMetadata.canvasLockedNodeIds)), [workspaceMetadata.canvasLockedNodeIds]);
+  const setUserPositionedNodeIds: React.Dispatch<React.SetStateAction<Set<string>>> = (action) => {
+    updateMetadataIds('canvasLockedNodeIds', (current) => [...(typeof action === 'function' ? action(new Set(current)) : action)]);
+  };
   const userPositionedNodeIdsRef = useRef<Set<string>>(userPositionedNodeIds);
   userPositionedNodeIdsRef.current = userPositionedNodeIds;
-  const [activeFile, setActiveFile] = useState<string>('sys_planager_core.pgr');
-  const [selectedId, setSelectedId] = useState<string | null>('cls_kb_editor');
+  const [activeFile, setActiveFile] = useState<string>('');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedIdRef = useRef<string | null>(selectedId);
   selectedIdRef.current = selectedId;
 
@@ -748,6 +228,7 @@ export function App() {
   );
   const [cursorLine, setCursorLine] = useState<number>(13);
   const [lineRangeFilter, setLineRangeFilter] = useState<{
+    fileName: string;
     start: number;
     end: number;
   } | null>(null);
@@ -797,23 +278,6 @@ export function App() {
     verticalX: null,
     horizontalY: null,
   });
-  type MoveHistoryEntry =
-    | {
-        kind: 'canvas_move';
-        positions: Record<string, { x: number; y: number }>;
-        lockedIds: string[];
-        movedIds: string[];
-      }
-    | {
-        kind: 'kb_file_move';
-        fileNames: Record<string, string>;
-        prevActiveFile: string;
-        movedIds: string[];
-      };
-
-  const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
-  const moveHistoryRef = useRef<MoveHistoryEntry[]>(moveHistory);
-  moveHistoryRef.current = moveHistory;
   const dragStartSnapshotRef = useRef<Record<
     string,
     { x: number; y: number }
@@ -901,15 +365,6 @@ export function App() {
       });
       if (movedIds.length > 0) {
         const prevLocked = Array.from(userPositionedNodeIdsRef.current);
-        const newEntry: MoveHistoryEntry = {
-          kind: 'canvas_move',
-          positions: startSnap,
-          lockedIds: prevLocked,
-          movedIds,
-        };
-        const nextHistory = [...moveHistoryRef.current.slice(-49), newEntry];
-        moveHistoryRef.current = nextHistory;
-        setMoveHistory(nextHistory);
         // Preserve all current element positions once the user manually adjusts layout on the Canvas
         const nextLocked = new Set<string>(
           elementsRef.current.map((el) => el.id)
@@ -1039,260 +494,85 @@ export function App() {
     };
   }, [activeTab, kbMainGraphOpen]);
 
-  // Ctrl + Z undo for single & multi-element movements on Canvas and between .pgr files in Knowledge Base
+  // Project-wide undo/redo uses the same snapshots for edits from every view.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
       const isZ =
         e.code === 'KeyZ' ||
         e.key.toLowerCase() === 'z' ||
         e.key.toLowerCase() === 'я';
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && isZ) {
-        const history = moveHistoryRef.current;
-        if (history.length === 0) return;
+      const isY = e.code === 'KeyY' || e.key.toLowerCase() === 'y' || e.key.toLowerCase() === 'н';
+      const projectEditor = !!target?.closest('[data-project-editor="true"]');
+      if (target && !projectEditor && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      const redoRequested = (isZ && e.shiftKey) || isY;
+      if ((e.ctrlKey || e.metaKey) && ((isZ && (!e.shiftKey || projectEditor)) || (isY && !projectEditor))) {
+        if (redoRequested ? !workspace.canRedo : !workspace.canUndo) return;
         e.preventDefault();
-        const lastEntry = history[history.length - 1];
-        const nextHistory = history.slice(0, -1);
-        moveHistoryRef.current = nextHistory;
-        setMoveHistory(nextHistory);
-
-        if (lastEntry.kind === 'canvas_move') {
-          const restoredLocked = new Set<string>(lastEntry.lockedIds);
-          userPositionedNodeIdsRef.current = restoredLocked;
-          setUserPositionedNodeIds(restoredLocked);
-          const nextElements = elementsRef.current.map((el) =>
-            lastEntry.positions[el.id]
-              ? { ...el, position: { ...lastEntry.positions[el.id] } }
-              : el
-          );
-          elementsRef.current = nextElements;
-          setElements(nextElements);
-          const count = lastEntry.movedIds.length;
-          showNotice(
-            count > 1
-              ? `Отменено перемещение (${count} элем.) (Ctrl+Z)`
-              : 'Отменено перемещение (Ctrl+Z)'
-          );
-        } else if (lastEntry.kind === 'kb_file_move') {
-          const nextElements = elementsRef.current.map((el) =>
-            lastEntry.fileNames[el.id]
-              ? { ...el, fileName: lastEntry.fileNames[el.id] }
-              : el
-          );
-          elementsRef.current = nextElements;
-          setElements(nextElements);
-          if (lastEntry.prevActiveFile) {
-            setActiveFile(lastEntry.prevActiveFile);
-          }
-          setUncommittedChanges((c) => Math.max(0, c - 1));
-          const count = lastEntry.movedIds.length;
-          showNotice(
-            count > 1
-              ? `Отменено перемещение между файлами (${count} элем.) (Ctrl+Z)`
-              : 'Отменено перемещение элемента в файл (Ctrl+Z)'
-          );
-        }
+        if (isZ && e.shiftKey) workspace.redo();
+        else if (isY) workspace.redo();
+        else workspace.undo();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [workspace.canUndo, workspace.canRedo, workspace.undo, workspace.redo]);
 
   // Unit Library state
-  const [unitLibrary, setUnitLibrary] =
-    useState<UnitLibraryItem[]>(INITIAL_UNIT_LIBRARY);
+  const [unitLibrary, setUnitLibrary] = useState<UnitLibraryItem[]>([]);
   const [libCategoryFilter, setLibCategoryFilter] = useState<
     'all' | ElementType
   >('all');
   const [libSearch, setLibSearch] = useState<string>('');
+  const [librarySaveQueue, setLibrarySaveQueue] = useState<PlanElement[]>([]);
+  const [libraryIconDraft, setLibraryIconDraft] = useState('blocks');
 
   // Settings state (Default 'dark' for Variation 5 System Dark)
   const [themeMode, setThemeMode] = useState<ThemeMode>('dark');
   const [posPalette, setPosPalette] = useState<PositivePaletteKey>('emerald');
   const [negPalette, setNegPalette] = useState<NegativePaletteKey>('crimson');
-  const [aiEndpoint, setAiEndpoint] = useState<string>(
-    'https://api.openai.com/v1'
-  );
-  const [aiEnabled, setAiEnabled] = useState<boolean>(true);
-  const [aiApiKey, setAiApiKey] = useState<string>('sk-proj-****...8f9a');
+  const [aiEndpoint, setAiEndpoint] = useState<string>('');
+  const [aiProvider, setAiProvider] = useState<AiProviderType>('gemini');
+  const [aiModel, setAiModel] = useState<string>(DEFAULT_GEMINI_MODEL);
+  const [providerApiKeys, setProviderApiKeys] = useState({ gemini: false, custom: false });
+  const hasAiApiKey = aiProvider === 'gemini' ? providerApiKeys.gemini : aiProvider === 'custom' ? providerApiKeys.custom : false;
+  const [chatgptConnected, setChatgptConnected] = useState(false);
+  const [chatgptEmail, setChatgptEmail] = useState<string | undefined>();
+  const [chatgptModels, setChatgptModels] = useState<ChatGptModel[]>([]);
+  const providerCredentialAvailable = aiProvider === 'chatgpt' ? chatgptConnected : hasAiApiKey;
+  const [aiEnabled, setAiEnabled] = useState<boolean>(false);
+  const [aiApiKey, setAiApiKey] = useState<string>('');
   const [aiLimits, setAiLimits] = useState<{
     rpm: number;
     rpd: number;
     tpm: number;
     tt: number;
-  }>({
-    rpm: 60,
-    rpd: 1000,
-    tpm: 90000,
-    tt: 500000,
-  });
+  }>({ rpm: 0, rpd: 0, tpm: 0, tt: 0 });
 
-  const [aiUsage, setAiUsage] = useState<{
-    rpm: number;
-    rpd: number;
-    tpm: number;
-    tt: number;
-  }>({
-    rpm: 14,
-    rpd: 342,
-    tpm: 28400,
-    tt: 184200,
-  });
-
-  const [aiUsageHistory, setAiUsageHistory] = useState<
-    {
-      id: string;
-      timestamp: string;
-      action: string;
-      model: string;
-      tokensPrompt: number;
-      tokensCompletion: number;
-      totalTokens: number;
-      status: '200 OK' | '429 Rate Limit' | '500 Error';
-      latencyMs: number;
-    }[]
-  >([
-    {
-      id: 'req_108',
-      timestamp: '17:42:10',
-      action: 'Анализ противоречий .pgr',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 1420,
-      tokensCompletion: 380,
-      totalTokens: 1800,
-      status: '200 OK',
-      latencyMs: 340,
-    },
-    {
-      id: 'req_107',
-      timestamp: '17:35:04',
-      action: 'Генерация вопросов интервью',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 2100,
-      tokensCompletion: 850,
-      totalTokens: 2950,
-      status: '200 OK',
-      latencyMs: 510,
-    },
-    {
-      id: 'req_106',
-      timestamp: '17:28:19',
-      action: 'Формирование предложений',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 3400,
-      tokensCompletion: 1120,
-      totalTokens: 4520,
-      status: '200 OK',
-      latencyMs: 620,
-    },
-    {
-      id: 'req_105',
-      timestamp: '16:50:11',
-      action: 'Развёртывание класса (system_pack)',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 1950,
-      tokensCompletion: 640,
-      totalTokens: 2590,
-      status: '200 OK',
-      latencyMs: 410,
-    },
-    {
-      id: 'req_104',
-      timestamp: '16:15:33',
-      action: 'Проверка RAG индекса',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 890,
-      tokensCompletion: 120,
-      totalTokens: 1010,
-      status: '200 OK',
-      latencyMs: 220,
-    },
-    {
-      id: 'req_103',
-      timestamp: '15:40:02',
-      action: 'Валидация графа элементов',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: 4100,
-      tokensCompletion: 980,
-      totalTokens: 5080,
-      status: '200 OK',
-      latencyMs: 780,
-    },
-  ]);
-
-  const [aiChartMetric, setAiChartMetric] = useState<'tokens' | 'requests'>('tokens');
-
-  const handleResetTotalTokens = () => {
-    setAiUsage((prev) => ({ ...prev, tt: 0 }));
-    showNotice('Искусственный лимит "TT" (Всего токенов) сброшен');
+  const handleResetTotalTokens = async () => {
+    await usage.resetTotal();
   };
 
-  const handleSimulateAiRequest = () => {
-    const promptT = Math.floor(Math.random() * 1500) + 500;
-    const complT = Math.floor(Math.random() * 600) + 200;
-    const totalT = promptT + complT;
-    const newEntry = {
-      id: `req_${Date.now().toString().slice(-4)}`,
-      timestamp: new Date().toTimeString().slice(0, 8),
-      action: 'Тестовый запрос ИИ-ассистента',
-      model: 'gemini-2.5-flash',
-      tokensPrompt: promptT,
-      tokensCompletion: complT,
-      totalTokens: totalT,
-      status: '200 OK' as const,
-      latencyMs: Math.floor(Math.random() * 400) + 200,
-    };
-    setAiUsageHistory((prev) => [newEntry, ...prev]);
-    setAiUsage((prev) => ({
-      rpm: Math.min(aiLimits.rpm, prev.rpm + 1),
-      rpd: prev.rpd + 1,
-      tpm: prev.tpm + totalT,
-      tt: prev.tt + totalT,
-    }));
-    showNotice(`Запрос выполнен: +${totalT} токенов`);
+  const handleSimulateAiRequest = async () => {
+    await usage.simulate();
   };
   const [gitEnabled, setGitEnabled] = useState<boolean>(true);
-  const [gitHistoryOpen, setGitHistoryOpen] = useState<boolean>(false);
   const [locale, setLocale] = useState<LocaleKey>('ru');
   const [activeSettingsSection, setActiveSettingsSection] =
     useState<string>('theme');
-
-  // Git commits & uncommitted count
-  const [uncommittedChanges, setUncommittedChanges] = useState<number>(3);
-  const [commits, setCommits] = useState<GitCommit[]>(() => [
-    {
-      id: 'commit_1',
-      hash: 'a4f920c',
-      message: 'Базовая структура sys_inventory.pgr и sys_factions.pgr',
-      timestamp: '2026-09-26 10:15',
-      author: 'main',
-      filesSnapshot: createSnapshotMap(INITIAL_ELEMENTS, INITIAL_FILES),
-      elementsSnapshot: JSON.parse(JSON.stringify(INITIAL_ELEMENTS)),
-    },
-  ]);
-  const [commitMsgInput, setCommitMsgInput] = useState<string>('');
-  const [diffFileSelect, setDiffFileSelect] =
-    useState<string>('sys_inventory.pgr');
+  const [libraryReady, setLibraryReady] = useState(false);
 
   // AI Assistant state & separate modals
-  const [aiActiveModal, setAiActiveModal] = useState<
-    'hub' | 'contradictions' | 'proposals' | 'interview' | 'transform' | null
-  >(null);
+  const [aiActiveModal, setAiActiveModal] = useState<AiWorkflowModal>(null);
   const [transformSourceId, setTransformSourceId] =
     useState<string>('idea_backlog');
-  const [transformPattern, setTransformPattern] = useState<
-    'system_pack' | 'class_hierarchy' | 'process_chain'
-  >('system_pack');
+  const [transformPattern, setTransformPattern] = useState<AiTransformPattern>('system_pack');
   const [transformSummary, setTransformSummary] = useState<string | null>(null);
+  const [pendingAiReview, setPendingAiReview] = useState<
+    | { kind: 'transform'; summary: string; createdElements: PlanElement[] }
+    | { kind: 'patch'; summary: string; targetId: string; patch: Partial<PlanElement>; before: PlanElement }
+    | null
+  >(null);
   type RadialOptionId =
     | 'conflicts'
     | 'proposals'
@@ -1314,7 +594,7 @@ export function App() {
   } | null>(null);
   const radialMenuRef = useRef<typeof radialMenu>(null);
   radialMenuRef.current = radialMenu;
-  const [aiContextIds, setAiContextIds] = useState<string[]>(['cls_item']);
+  const [aiContextIds, setAiContextIds] = useState<string[]>([]);
   const aiContextIdsRef = useRef<string[]>(aiContextIds);
   aiContextIdsRef.current = aiContextIds;
   const [kbDraggedIds, setKbDraggedIds] = useState<string[]>([]);
@@ -1367,12 +647,10 @@ export function App() {
   };
   const [proposals, setProposals] = useState<AiProposalCard[]>([]);
   const [contradictions, setContradictions] = useState<AiContradiction[]>([]);
-  const [ignoredContradictionIds, setIgnoredContradictionIds] = useState<
-    string[]
-  >([]);
-  const [rejectedContradictionIds, setRejectedContradictionIds] = useState<
-    string[]
-  >([]);
+  const ignoredContradictionIds = useMemo(() => readMetadataIds(workspaceMetadata.ignoredContradictionIds), [workspaceMetadata.ignoredContradictionIds]);
+  const setIgnoredContradictionIds: React.Dispatch<React.SetStateAction<string[]>> = (action) => updateMetadataIds('ignoredContradictionIds', action);
+  const rejectedContradictionIds = useMemo(() => readMetadataIds(workspaceMetadata.rejectedContradictionIds), [workspaceMetadata.rejectedContradictionIds]);
+  const setRejectedContradictionIds: React.Dispatch<React.SetStateAction<string[]>> = (action) => updateMetadataIds('rejectedContradictionIds', action);
   const [showCanvasConflictOverlay, setShowCanvasConflictOverlay] =
     useState<boolean>(true);
   const [canvasConflictFilter, setCanvasConflictFilter] =
@@ -1385,7 +663,6 @@ export function App() {
   const [conflictFormTitle, setConflictFormTitle] = useState<string>('');
   const [conflictFormDesc, setConflictFormDesc] = useState<string>('');
   const [conflictFormFix, setConflictFormFix] = useState<string>('');
-  const [conflictFormFixLabel, setConflictFormFixLabel] = useState<string>('');
   const [conflictFormComment, setConflictFormComment] = useState<string>('');
   const canvasNodeDownClientRef = useRef<{ x: number; y: number }>({
     x: 0,
@@ -1394,6 +671,7 @@ export function App() {
   const [interviewQuestions, setInterviewQuestions] = useState<
     AiInterviewQuestion[]
   >([]);
+  const [interviewAnswerDrafts, setInterviewAnswerDrafts] = useState<Record<string, string>>({});
   const [rejectProposalModal, setRejectProposalModal] =
     useState<AiProposalCard | null>(null);
   const [rejectReasonInput, setRejectReasonInput] = useState<string>('');
@@ -1404,30 +682,329 @@ export function App() {
   const [newElType, setNewElType] = useState<ElementType>('class');
   const [newElTitle, setNewElTitle] = useState<string>('');
   const [newElSlug, setNewElSlug] = useState<string>('');
-  const [newElFile, setNewElFile] = useState<string>('sys_inventory.pgr');
-  const [newElParent, setNewElParent] = useState<string>('sys_inventory');
+  const [newElFile, setNewElFile] = useState<string>('');
+  const [newElParent, setNewElParent] = useState<string>('-');
   const [newElMvp, setNewElMvp] = useState<boolean>(true);
 
-  // Inline field/method/step inputs
-  const [inlineFieldName, setInlineFieldName] = useState<string>('');
-  const [inlineFieldType, setInlineFieldType] = useState<string>('string');
-  const [inlineFieldDesc, setInlineFieldDesc] = useState<string>('');
-  const [inlineMethodVis, setInlineMethodVis] = useState<'+' | '-'>('+');
-  const [inlineMethodSig, setInlineMethodSig] = useState<string>('');
-  const [inlineMethodDesc, setInlineMethodDesc] = useState<string>('');
-  const [inlineStepText, setInlineStepText] = useState<string>('');
-  const [inlineInterfaceText, setInlineInterfaceText] = useState<string>('');
-  const [inlineLogicText, setInlineLogicText] = useState<string>('');
+  const openNewElementModal = (targetFile?: string) => {
+    setNewElParent('-');
+    setNewElTitle('');
+    setNewElSlug('');
+    setNewElFile(targetFile || activeFile || files[0] || 'sys_core.pgr');
+    setNewElementModalOpen(true);
+  };
+
 
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   const t = I18N_DICTIONARY[locale];
+  const tx = (ru: string, en: string) => localizedText(locale, ru, en);
+  const git = useGitWorkspace({
+    enabled: gitEnabled,
+    locale,
+    workspaceReady: workspace.workspaceReady,
+    workspacePreview: workspace.preview,
+    workspaceSaving: workspace.saving,
+    workspaceRevision: workspace.revision,
+    activeTab,
+    activeSettingsSection,
+  });
+  const usage = useUsageLedger((cause) =>
+    setStatusNotice(`${tx('История использования недоступна', 'Usage history is unavailable')}: ${cause instanceof Error ? cause.message : String(cause)}`)
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadSettings().then((settings: AppSettings) => {
+      if (!active) return;
+      setThemeMode(settings.themeMode);
+      setPosPalette(settings.positivePalette);
+      setNegPalette(settings.negativePalette);
+      setLocale(settings.locale);
+      setGitEnabled(settings.gitEnabled);
+      setAiProvider(settings.aiProvider.provider);
+      setAiModel(settings.aiProvider.provider === 'gemini' ? settings.aiProvider.geminiModel : settings.aiProvider.customModel);
+      if (settings.aiProvider.provider === 'chatgpt' && settings.aiProvider.chatgptModel) setAiModel(settings.aiProvider.chatgptModel);
+      setAiEndpoint(settings.aiProvider.customEndpoint);
+      setProviderApiKeys(settings.apiKeyStatus);
+      setAiEnabled(settings.hasKey);
+      setAiLimits({ rpm: settings.rateLimits.rpm, rpd: settings.rateLimits.rpd, tpm: settings.rateLimits.tpm, tt: settings.rateLimits.totalTokens });
+    }).catch((cause: unknown) => {
+      if (active) setStatusNotice(`${tx('Настройки не загружены', 'Settings failed to load')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (aiProvider !== 'chatgpt' || !chatgptConnected || chatgptModels.length === 0) return;
+    if (!chatgptModels.some((model) => model.slug === aiModel)) setAiModel(chatgptModels[0].slug);
+  }, [aiProvider, chatgptConnected, chatgptModels, aiModel]);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let active = true;
+    getChatGptStatus().then(async (account) => {
+      if (!active) return;
+      setChatgptConnected(account.connected);
+      setChatgptEmail(account.email);
+      if (!account.connected) return;
+      const result = await loadChatGptModels();
+      if (!active) return;
+      setChatgptModels(result.models);
+      const saved = await loadSettings();
+      if (active && saved.aiProvider.provider === 'chatgpt') {
+        if (!result.models.some((model) => model.slug === saved.aiProvider.chatgptModel)) setAiModel(result.models[0]?.slug || '');
+        setAiEnabled(true);
+      }
+    }).catch((cause: unknown) => {
+      if (active) setStatusNotice(`${tx('Список моделей ChatGPT недоступен', 'ChatGPT models are unavailable')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadUnitLibrary().then((items) => {
+      if (active) {
+        setUnitLibrary(items);
+        setLibraryReady(true);
+      }
+    }).catch((cause: unknown) => {
+      if (active) setStatusNotice(`${tx('Библиотека не загружена', 'Library failed to load')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!libraryReady) return;
+    const timer = window.setTimeout(() => {
+      saveUnitLibrary(unitLibrary).catch((cause: unknown) =>
+        setStatusNotice(`${tx('Библиотека не сохранена', 'Library failed to save')}: ${cause instanceof Error ? cause.message : String(cause)}`)
+      );
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [libraryReady, unitLibrary]);
+
+  const aiConfig = useMemo(() => ({
+    provider: aiProvider,
+    geminiModel: (aiProvider === 'gemini' ? aiModel : DEFAULT_GEMINI_MODEL) as AiProviderConfig['geminiModel'],
+    customEndpoint: aiEndpoint,
+    customModel: aiProvider === 'custom' ? aiModel : '',
+    chatgptModel: aiProvider === 'chatgpt' ? aiModel : '',
+  }), [aiProvider, aiEndpoint, aiModel]);
+
+  const handleChatgptConnect = async () => {
+    const account = await connectChatGpt();
+    setChatgptConnected(account.connected);
+    setChatgptEmail(account.email);
+    const result = await loadChatGptModels();
+    setChatgptModels(result.models);
+    const selected = result.models.some((model) => model.slug === aiModel) ? aiModel : result.models[0]?.slug || '';
+    setAiProvider('chatgpt');
+    setAiModel(selected);
+    setAiEnabled(true);
+    showNotice(tx('ChatGPT подключён', 'ChatGPT connected'));
+  };
+
+  const handleChatgptDisconnect = async () => {
+    const result = await disconnectChatGpt();
+    setChatgptConnected(false);
+    setChatgptEmail(undefined);
+    setChatgptModels([]);
+    if (aiProvider === 'chatgpt') setAiEnabled(false);
+    showNotice(result.warning || tx('ChatGPT отключён', 'ChatGPT disconnected'));
+  };
+
+  const handleChatgptSwitchAccount = async () => {
+    const result = await forgetChatGpt();
+    setChatgptConnected(false);
+    setChatgptEmail(undefined);
+    setChatgptModels([]);
+    if (aiProvider === 'chatgpt' && !hasAiApiKey) setAiEnabled(false);
+    showNotice(result.warning || tx('Локальная связь удалена. Теперь войдите в другой аккаунт.', 'Local account link removed. Sign in with another account now.'));
+  };
+
+  const handleChatgptRefreshModels = async () => {
+    const result = await loadChatGptModels();
+    setChatgptModels(result.models);
+    if (!result.models.some((model) => model.slug === aiModel)) setAiModel(result.models[0]?.slug || '');
+  };
+
+  const handleSaveSettings = async (secret?: string) => {
+    try {
+      const result = await saveSettings({
+        themeMode, positivePalette: posPalette, negativePalette: negPalette, locale,
+        gitEnabled, aiProvider: aiConfig,
+        rateLimits: { rpm: aiLimits.rpm, rpd: aiLimits.rpd, tpm: aiLimits.tpm, totalTokens: aiLimits.tt },
+      }, secret);
+      setProviderApiKeys(result.apiKeyStatus);
+      setAiEnabled(aiProvider === 'chatgpt' ? chatgptConnected : result.hasKey);
+      showNotice(tx('Настройки сохранены', 'Settings saved'));
+    } catch (cause) {
+      throw cause;
+    }
+  };
+
+  const handleProviderChange = (provider: AiProviderType) => {
+    setAiProvider(provider);
+    setAiEnabled(provider === 'chatgpt'
+      ? chatgptConnected
+      : provider === 'gemini'
+        ? providerApiKeys.gemini
+        : providerApiKeys.custom);
+  };
+
+  const testSavedProvider = async () => {
+    const response = await testProvider(locale);
+    await usage.refresh();
+    if (!response.ok) throw new Error(`${tx('Подключение не подтверждено', 'Connection was not confirmed')}: ${response.providerUsed || aiProvider} / ${response.modelUsed || aiModel}`);
+  };
+
+  useEffect(() => {
+    if (!workspace.loaded || files.length === 0 || files.includes(activeFile)) return;
+    setActiveFile(files[0]);
+    setSelectedId(null);
+  }, [workspace.loaded, files, activeFile]);
 
   const showNotice = (msg: string) => {
     setStatusNotice(msg);
     setTimeout(() => {
       setStatusNotice((prev) => (prev === msg ? null : prev));
     }, 3000);
+  };
+
+  const checkoutGitBranch = async (branch: string) => {
+    try {
+      await workspace.runWorkspaceOperation(async ({ reload }) => {
+        await desktopInvoke('git_checkout', { branch });
+        await reload();
+        await git.refreshStatus();
+      });
+      showNotice(`${tx('Переключено на', 'Switched to')} ${branch}`);
+    } catch (cause) { git.setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+
+  const runAiAnalysis = async () => {
+    if (!aiEnabled || !providerCredentialAvailable) {
+      showNotice(tx('Настройте провайдера для AI-предложений. Локальные проверки схемы остаются доступны на холсте.', 'Configure a provider for AI suggestions. Local schema checks remain available on the canvas.'));
+      setActiveTab('settings');
+      setActiveSettingsSection('ai');
+      return;
+    }
+    try {
+      const result = await analyze({ elements, selectedIds: aiContextIds, files, config: aiConfig, locale });
+      setProposals(result.proposals);
+      setContradictions(result.contradictions.filter((item) => !ignoredContradictionIds.includes(item.id) && !rejectedContradictionIds.includes(item.id)));
+      await usage.refresh();
+      showNotice(`${tx('Проверка завершена', 'Review complete')}: ${result.contradictions.length} ${tx('противоречий', 'contradictions')}, ${result.proposals.length} ${tx('предложений', 'proposals')} · ${result.providerUsed}/${result.modelUsed}`);
+    } catch (cause) {
+      showNotice(`${tx('Анализ не выполнен', 'Analysis failed')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const runProblemInterview = async () => {
+    if (!aiEnabled || !providerCredentialAvailable) {
+      showNotice(tx('Сначала настройте провайдера и сохраните API key.', 'Configure a provider and save the API key first.'));
+      setActiveTab('settings');
+      setActiveSettingsSection('ai');
+      return;
+    }
+    try {
+      const answers = interviewAnswersForContext(workspaceMetadata.interviewAnswers, aiContextIds);
+      const result = await interview({ elements, selectedIds: aiContextIds, files, answers, config: aiConfig, locale });
+      setInterviewQuestions(result.questions);
+      await usage.refresh();
+      showNotice(`${tx('Получено вопросов', 'Questions received')}: ${result.questions.length}`);
+    } catch (cause) {
+      showNotice(`${tx('Интервью не выполнено', 'Interview failed')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const runTransformation = async (source: PlanElement, pattern: 'system_pack' | 'class_hierarchy' | 'process_chain') => {
+    if (!aiEnabled || !providerCredentialAvailable) {
+      showNotice(tx('Сначала настройте провайдера и сохраните API key.', 'Configure a provider and save the API key first.'));
+      setActiveTab('settings');
+      setActiveSettingsSection('ai');
+      return;
+    }
+    try {
+      const result = await transform({ sourceElement: source, targetPattern: pattern, existingElements: elements, config: aiConfig, locale });
+      const ids = new Set(elements.map((element) => element.id));
+      if (result.createdElements.some((element) => ids.has(element.id))) throw new Error('Transform result contains an existing element ID');
+      setTransformSummary(result.summary);
+      setPendingAiReview({ kind: 'transform', summary: result.summary, createdElements: result.createdElements });
+      await usage.refresh();
+      showNotice(result.summary);
+    } catch (cause) {
+      showNotice(`${tx('Преобразование не выполнено', 'Transformation failed')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const submitInterviewAnswer = async (question: AiInterviewQuestion, answer: string) => {
+    setWorkspaceMetadata((previous) => ({
+      ...previous,
+      interviewAnswers: saveInterviewAnswer(previous.interviewAnswers, question, answer),
+    }));
+    const target = elements.find((element) => element.id === question.targetElementId);
+    if (!target) {
+      showNotice(tx('Ответ сохранён; вопрос не связан с конкретным элементом.', 'Answer saved; the question is not linked to a specific element.'));
+      return;
+    }
+    try {
+      const result = await applyInterviewAnswer({ targetElement: target, question: question.question, answer, config: aiConfig, existingElements: elements, locale });
+      const { id: _id, type: _type, fileName: _fileName, position: _position, ...patch } = result.updatedElement;
+      setPendingAiReview({ kind: 'patch', summary: result.summary, targetId: target.id, patch, before: target });
+    } catch (cause) {
+      showNotice(`${tx('Ответ сохранён, но AI patch не применён', 'Answer saved, but the AI patch was not applied')}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  const applyPendingAiReview = () => {
+    if (!pendingAiReview) return;
+    if (pendingAiReview.kind === 'transform') {
+      const ids = new Set(elements.map((element) => element.id));
+      if (pendingAiReview.createdElements.some((element) => ids.has(element.id))) {
+        showNotice(tx('Проект изменился: ID элемента уже существует. Изменения ИИ не применены.', 'The project changed: an element ID now exists. AI changes were not applied.'));
+        setPendingAiReview(null);
+        return;
+      }
+      const graph = buildAndValidateGraph([...elements, ...pendingAiReview.createdElements]);
+      const newIds = new Set(pendingAiReview.createdElements.map((element) => element.id));
+      const invalidNewElement = graph.warnings.some((warning) => newIds.has(warning.elementId)) ||
+        graph.edges.some((edge) => newIds.has(edge.source) && !edge.valid);
+      if (invalidNewElement) {
+        showNotice(tx('Предложенные связи больше невалидны. Изменения ИИ не применены.', 'The proposed references are no longer valid. AI changes were not applied.'));
+        setPendingAiReview(null);
+        return;
+      }
+      setElements((current) => [...current, ...pendingAiReview.createdElements]);
+    } else {
+      const current = elements.find((element) => element.id === pendingAiReview.targetId);
+      if (!current) {
+        showNotice(tx('Целевой элемент удалён. Изменения ИИ не применены.', 'The target element was deleted. AI changes were not applied.'));
+        setPendingAiReview(null);
+        return;
+      }
+      const changedFields = (Object.keys(pendingAiReview.patch) as (keyof PlanElement)[])
+        .filter((field) => JSON.stringify(current[field]) !== JSON.stringify(pendingAiReview.before[field]));
+      if (changedFields.length > 0) {
+        showNotice(tx('Элемент изменился после ответа ИИ. Обновите анализ и проверьте новое предложение.', 'The element changed after the AI response. Refresh the analysis and review the updated proposal.'));
+        setPendingAiReview(null);
+        return;
+      }
+      const updated = { ...current, ...pendingAiReview.patch };
+      const graph = buildAndValidateGraph(elements.map((element) => element.id === current.id ? updated : element));
+      const invalidPatch = graph.warnings.some((warning) => warning.elementId === updated.id) ||
+        graph.edges.some((edge) => edge.source === updated.id && !edge.valid);
+      if (invalidPatch) {
+        showNotice(tx('Связи изменились и patch больше невалиден. Изменения ИИ не применены.', 'References changed and the patch is no longer valid. AI changes were not applied.'));
+        setPendingAiReview(null);
+        return;
+      }
+      setElements((currentElements) => currentElements.map((element) => element.id === updated.id ? updated : element));
+    }
+    showNotice(pendingAiReview.summary);
+    setPendingAiReview(null);
   };
 
   // Context Menu Handlers
@@ -1470,10 +1047,10 @@ export function App() {
       const next = new Set(prev);
       if (next.has(id)) {
         next.delete(id);
-        showNotice(`Снята отметка: ${id}`);
+        showNotice(`${tx('Снята отметка', 'Bookmark removed')}: ${id}`);
       } else {
         next.add(id);
-        showNotice(`Отмечено как важное: ${id}`);
+        showNotice(`${tx('Отмечено как важное', 'Marked as important')}: ${id}`);
       }
       return next;
     });
@@ -1490,13 +1067,13 @@ export function App() {
     });
     setCollapsedFolders(nextFolders);
     setCollapsedFiles(nextFiles);
-    showNotice('Все подпапки и файлы свернуты');
+    showNotice(tx('Все подпапки и файлы свернуты', 'All subfolders and files collapsed'));
   };
 
   const handleExpandAll = () => {
     setCollapsedFolders({});
     setCollapsedFiles({});
-    showNotice('Все папки и файлы развернуты');
+    showNotice(tx('Все папки и файлы развернуты', 'All folders and files expanded'));
   };
 
   const handleOpenNewResource = (
@@ -1528,7 +1105,7 @@ export function App() {
         setFiles((prev) => [...prev, initialFile]);
         setActiveFile(initialFile);
       }
-      showNotice(`Создана папка ${folderSlug}/`);
+      showNotice(`${tx('Создана папка', 'Folder created')} ${folderSlug}/`);
     } else {
       let fileName = raw;
       if (!fileName.endsWith('.pgr')) fileName += '.pgr';
@@ -1538,9 +1115,9 @@ export function App() {
       if (!files.includes(fileName)) {
         setFiles((prev) => [...prev, fileName]);
         setActiveFile(fileName);
-        showNotice(`Создан файл ${fileName}`);
+        showNotice(`${tx('Создан файл', 'File created')} ${fileName}`);
       } else {
-        showNotice(`Файл ${fileName} уже существует`);
+        showNotice(`${tx('Файл', 'File')} ${fileName} ${tx('уже существует', 'already exists')}`);
       }
     }
     setNewResourceModal(null);
@@ -1558,6 +1135,8 @@ export function App() {
         currentName: target.fileName,
         newName: cur,
       });
+    } else if (target.type === 'folder') {
+      setRenameModal({ isOpen: true, type: 'folder', id: target.folderName, currentName: target.folderName, newName: target.folderName });
     } else if (target.type === 'element') {
       setRenameModal({
         isOpen: true,
@@ -1568,6 +1147,30 @@ export function App() {
         newName: target.elementId,
       });
     }
+  };
+
+  const applyElementIdRename = (oldId: string, newId: string): boolean => {
+    if (oldId === newId) return true;
+    let renamed: PlanElement[];
+    try {
+      renamed = renameElementId(elements, oldId, newId);
+    } catch (cause) {
+      showNotice(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+
+    setElements(renamed);
+    if (selectedId === oldId) setSelectedId(newId);
+    setAiContextIds((previous) => previous.map((id) => (id === oldId ? newId : id)));
+    setStarredItems((previous) => {
+      if (!previous.has(oldId)) return previous;
+      const next = new Set(previous);
+      next.delete(oldId);
+      next.add(newId);
+      return next;
+    });
+    showNotice(`${tx('Элемент переименован', 'Element renamed')}: ${oldId} -> ${newId}`);
+    return true;
   };
 
   const handleConfirmRename = () => {
@@ -1589,12 +1192,9 @@ export function App() {
         setRenameModal(null);
         return;
       }
-      setFiles((prev) => prev.map((f) => (f === oldName ? finalName : f)));
-      setElements((prev) =>
-        prev.map((el) =>
-          el.fileName === oldName ? { ...el, fileName: finalName } : el
-        )
-      );
+      if (files.includes(finalName)) { showNotice(`${tx('Файл', 'File')} ${finalName} ${tx('уже существует', 'already exists')}`); return; }
+      renameSourcePath(oldName, finalName);
+      setElements((prev) => renameFileElements(prev, oldName, finalName));
       if (activeFile === oldName) setActiveFile(finalName);
       setStarredItems((prev) => {
         if (!prev.has(oldName)) return prev;
@@ -1603,61 +1203,28 @@ export function App() {
         next.add(finalName);
         return next;
       });
-      showNotice(`Файл переименован: ${oldName} -> ${finalName}`);
+      showNotice(`${tx('Файл переименован', 'File renamed')}: ${oldName} -> ${finalName}`);
+    } else if (renameModal.type === 'folder') {
+      const oldName = renameModal.id;
+      const finalName = raw.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+      if (oldName === finalName) { setRenameModal(null); return; }
+      if (customFolders.includes(finalName)) { showNotice(`${tx('Папка', 'Folder')} ${finalName} ${tx('уже существует', 'already exists')}`); return; }
+      renameFolderPath(oldName, finalName);
+      setElements((previous) => previous.map((element) => element.fileName.startsWith(`${oldName}/`) ? { ...element, fileName: `${finalName}${element.fileName.slice(oldName.length)}` } : element));
+      if (activeFile.startsWith(`${oldName}/`)) setActiveFile(`${finalName}${activeFile.slice(oldName.length)}`);
+      setStarredItems((previous) => new Set([...previous].map((item) => item === oldName || item.startsWith(`${oldName}/`) ? `${finalName}${item.slice(oldName.length)}` : item)));
+      showNotice(`${tx('Папка переименована', 'Folder renamed')}: ${oldName} -> ${finalName}`);
     } else if (renameModal.type === 'element') {
       const oldId = renameModal.id;
       const newId = raw.replace(/[^a-zA-Z0-9_-]/g, '_');
-      if (oldId === newId) {
-        setRenameModal(null);
-        return;
-      }
-      setElements((prev) =>
-        prev.map((el) => {
-          let updated = el;
-          if (el.id === oldId) {
-            updated = { ...updated, id: newId };
-          }
-          if (el.parent === oldId) {
-            updated = { ...updated, parent: newId };
-          }
-          if (el.extendsId === oldId) {
-            updated = { ...updated, extendsId: newId };
-          }
-          if (el.instanceOf === oldId) {
-            updated = { ...updated, instanceOf: newId };
-          }
-          if (el.components?.includes(oldId)) {
-            updated = {
-              ...updated,
-              components: el.components.map((c) => (c === oldId ? newId : c)),
-            };
-          }
-          if (el.uses?.includes(oldId)) {
-            updated = {
-              ...updated,
-              uses: el.uses.map((c) => (c === oldId ? newId : c)),
-            };
-          }
-          return updated;
-        })
-      );
-      if (selectedId === oldId) setSelectedId(newId);
-      setAiContextIds((prev) => prev.map((id) => (id === oldId ? newId : id)));
-      setStarredItems((prev) => {
-        if (!prev.has(oldId)) return prev;
-        const next = new Set(prev);
-        next.delete(oldId);
-        next.add(newId);
-        return next;
-      });
-      showNotice(`Элемент переименован: ${oldId} -> ${newId}`);
+      if (!applyElementIdRename(oldId, newId)) return;
     }
     setRenameModal(null);
   };
 
   const handleDeleteFile = (fileName: string) => {
     if (files.length <= 1) {
-      showNotice('Нельзя удалить единственный файл проекта');
+    showNotice(tx('Нельзя удалить единственный файл проекта', 'The only project file cannot be deleted'));
       return;
     }
     setDeleteFileConfirm(fileName);
@@ -1666,21 +1233,21 @@ export function App() {
   const handleConfirmDeleteFile = () => {
     if (!deleteFileConfirm) return;
     const targetFile = deleteFileConfirm;
-    setFiles((prev) => prev.filter((f) => f !== targetFile));
-    setElements((prev) => prev.filter((el) => el.fileName !== targetFile));
+    removeSourcePath(targetFile);
+    setElements((prev) => deleteElements(prev, prev.filter((el) => el.fileName === targetFile).map((el) => el.id)));
     if (activeFile === targetFile) {
       const remaining = files.filter((f) => f !== targetFile);
       setActiveFile(remaining[0] || '');
       setSelectedId(null);
     }
-    showNotice(`Файл ${targetFile} удалён`);
+    showNotice(`${tx('Файл', 'File')} ${targetFile} ${tx('удалён', 'deleted')}`);
     setDeleteFileConfirm(null);
   };
 
   const handleCut = (target: KbContextMenuTarget) => {
     if (target.type === 'file') {
       setKbClipboard({ mode: 'cut', type: 'file', id: target.fileName });
-      showNotice(`Вырезан файл: ${target.fileName}`);
+      showNotice(`${tx('Вырезан файл', 'File cut')}: ${target.fileName}`);
     } else if (target.type === 'element') {
       setKbClipboard({
         mode: 'cut',
@@ -1688,14 +1255,17 @@ export function App() {
         id: target.elementId,
         sourceFileName: target.fileName,
       });
-      showNotice(`Вырезан элемент: ${target.elementId}`);
+      showNotice(`${tx('Вырезан элемент', 'Element cut')}: ${target.elementId}`);
+    } else if (target.type === 'folder') {
+      setKbClipboard({ mode: 'cut', type: 'folder', id: target.folderName });
+      showNotice(`${tx('Вырезана папка', 'Folder cut')}: ${target.folderName}`);
     }
   };
 
   const handleCopy = (target: KbContextMenuTarget) => {
     if (target.type === 'file') {
       setKbClipboard({ mode: 'copy', type: 'file', id: target.fileName });
-      showNotice(`Скопирован файл: ${target.fileName}`);
+      showNotice(`${tx('Скопирован файл', 'File copied')}: ${target.fileName}`);
     } else if (target.type === 'element') {
       setKbClipboard({
         mode: 'copy',
@@ -1703,7 +1273,10 @@ export function App() {
         id: target.elementId,
         sourceFileName: target.fileName,
       });
-      showNotice(`Скопирован элемент: ${target.elementId}`);
+      showNotice(`${tx('Скопирован элемент', 'Element copied')}: ${target.elementId}`);
+    } else if (target.type === 'folder') {
+      setKbClipboard({ mode: 'copy', type: 'folder', id: target.folderName });
+      showNotice(`${tx('Скопирована папка', 'Folder copied')}: ${target.folderName}`);
     }
   };
 
@@ -1719,123 +1292,164 @@ export function App() {
     if (kbClipboard.type === 'element') {
       const sourceEl = elements.find((e) => e.id === kbClipboard.id);
       if (!sourceEl) {
-        showNotice('Исходный элемент не найден');
+        showNotice(tx('Исходный элемент не найден', 'Source element was not found'));
         return;
       }
       if (kbClipboard.mode === 'cut') {
         if (sourceEl.fileName === targetFile) {
-          showNotice(`Элемент уже находится в файле ${targetFile}`);
+          showNotice(`${tx('Элемент уже находится в файле', 'Element is already in file')} ${targetFile}`);
           return;
         }
-        const prevFileNames: Record<string, string> = {};
-        elements.forEach((el) => {
-          prevFileNames[el.id] = el.fileName;
-        });
-        const newEntry: MoveHistoryEntry = {
-          kind: 'kb_file_move',
-          fileNames: prevFileNames,
-          prevActiveFile: activeFile,
-          movedIds: [sourceEl.id],
-        };
-        const nextHistory = [...moveHistoryRef.current.slice(-49), newEntry];
-        moveHistoryRef.current = nextHistory;
-        setMoveHistory(nextHistory);
-        setElements((prev) =>
-          prev.map((el) =>
-            el.id === sourceEl.id ? { ...el, fileName: targetFile } : el
-          )
-        );
+        setElements((prev) => moveElementsToFile(prev, [sourceEl.id], targetFile));
         setActiveFile(targetFile);
         setSelectedId(sourceEl.id);
         setAiContextIds([sourceEl.id]);
         setKbClipboard(null);
-        showNotice(`Элемент ${sourceEl.id} перемещён в ${targetFile}`);
+        showNotice(`${tx('Элемент', 'Element')} ${sourceEl.id} ${tx('перемещён в', 'moved to')} ${targetFile}`);
       } else {
-        const uniqueSuffix = Date.now().toString().slice(-4);
-        const newId = `${sourceEl.id}_copy_${uniqueSuffix}`;
-        const cloned: PlanElement = {
-          ...JSON.parse(JSON.stringify(sourceEl)),
-          id: newId,
-          title: `${sourceEl.title} (Копия)`,
-          fileName: targetFile,
-          position: {
-            x: (sourceEl.position?.x || 100) + 40,
-            y: (sourceEl.position?.y || 100) + 40,
-          },
-        };
+        const cloned = cloneElements(elements, [sourceEl.id], targetFile)[0];
+        const newId = cloned.id;
+        cloned.title = `${sourceEl.title} (Копия)`;
         setElements((prev) => [...prev, cloned]);
         setActiveFile(targetFile);
         setSelectedId(newId);
         setAiContextIds([newId]);
-        showNotice(`Скопирован элемент ${newId} в ${targetFile}`);
+        showNotice(`${tx('Скопирован элемент', 'Copied element')} ${newId} ${tx('в', 'to')} ${targetFile}`);
       }
     } else if (kbClipboard.type === 'file') {
       const sourceFile = kbClipboard.id;
       const fileElems = elements.filter((e) => e.fileName === sourceFile);
-      const baseName = sourceFile.replace('.pgr', '');
-      const uniqueSuffix = Date.now().toString().slice(-4);
-      const newFileName = `${baseName}_copy_${uniqueSuffix}.pgr`;
-      const clonedElements: PlanElement[] = fileElems.map((el) => ({
-        ...JSON.parse(JSON.stringify(el)),
-        id: `${el.id}_c${uniqueSuffix}`,
-        fileName: newFileName,
-        position: {
-          x: (el.position?.x || 100) + 30,
-          y: (el.position?.y || 100) + 30,
-        },
-      }));
-      setFiles((prev) => [...prev, newFileName]);
-      setElements((prev) => [...prev, ...clonedElements]);
-      setActiveFile(newFileName);
       if (kbClipboard.mode === 'cut') {
+        const baseName = sourceFile.split('/').pop() || sourceFile;
+        const destinationFolder = target.type === 'folder'
+          ? target.folderName
+          : target.type === 'file' && target.fileName.includes('/')
+            ? target.fileName.slice(0, target.fileName.lastIndexOf('/'))
+            : '';
+        const newFileName = destinationFolder ? `${destinationFolder}/${baseName}` : baseName;
+        if (files.includes(newFileName)) { showNotice(`${tx('Файл', 'File')} ${newFileName} ${tx('уже существует', 'already exists')}`); return; }
+        workspace.renameSourcePath(sourceFile, newFileName);
+        setElements((previous) => renameFileElements(previous, sourceFile, newFileName));
+        if (target.type === 'folder' && !customFolders.includes(target.folderName)) setCustomFolders((previous) => [...previous, target.folderName]);
+        setActiveFile(newFileName);
         setKbClipboard(null);
+        showNotice(`${tx('Файл перемещён', 'File moved')}: ${sourceFile} → ${newFileName}`);
+      } else {
+        const sourceBase = sourceFile.split('/').pop() || sourceFile;
+        const extensionless = sourceBase.replace(/\.pgr$/i, '');
+        let suffix = 1;
+        let newFileName = `${extensionless}_copy.pgr`;
+        while (files.includes(newFileName)) newFileName = `${extensionless}_copy${suffix++}.pgr`;
+        const clonedElements = cloneElements(elements, fileElems.map((el) => el.id), newFileName);
+        workspace.copySourcePath(sourceFile, newFileName);
+        setElements((prev) => [...prev, ...clonedElements]);
+        setActiveFile(newFileName);
+        showNotice(`${tx('Создана копия файла', 'File copy created')} ${newFileName}`);
       }
-      showNotice(`Создана копия файла ${newFileName}`);
+    } else if (kbClipboard.type === 'folder') {
+      const sourceFolder = kbClipboard.id;
+      const base = sourceFolder.split('/').pop() || sourceFolder;
+      const targetFolder = target.type === 'folder'
+        ? target.folderName
+        : target.type === 'file' && target.fileName.includes('/')
+          ? target.fileName.slice(0, target.fileName.lastIndexOf('/'))
+          : '';
+      if (targetFolder === sourceFolder || targetFolder.startsWith(`${sourceFolder}/`)) {
+        showNotice(tx('Папку нельзя переместить или скопировать внутрь самой себя.', 'A folder cannot be moved or copied inside itself.'));
+        return;
+      }
+      const destinationBase = targetFolder ? `${targetFolder}/${base}` : base;
+      if (kbClipboard.mode === 'cut') {
+        const destination = targetFolder ? destinationBase : base;
+        if (files.some((path) => path.startsWith(`${destination}/`)) || customFolders.includes(destination)) {
+          showNotice(`${tx('Папка', 'Folder')} ${destination} ${tx('уже существует', 'already exists')}`);
+          return;
+        }
+        renameFolderPath(sourceFolder, destination);
+        setElements((previous) => previous.map((element) => element.fileName.startsWith(`${sourceFolder}/`) ? { ...element, fileName: `${destination}${element.fileName.slice(sourceFolder.length)}` } : element));
+        setStarredItems((previous) => new Set([...previous].map((item) => item === sourceFolder || item.startsWith(`${sourceFolder}/`) ? `${destination}${item.slice(sourceFolder.length)}` : item)));
+        setKbClipboard(null);
+        showNotice(`${tx('Папка перемещена', 'Folder moved')}: ${sourceFolder} → ${destination}`);
+      } else {
+        let destination = `${destinationBase}_copy`;
+        let suffix = 1;
+        while (customFolders.includes(destination) || files.some((path) => path.startsWith(`${destination}/`))) destination = `${destinationBase}_copy${suffix++}`;
+        const sourcePaths = files.filter((path) => path.startsWith(`${sourceFolder}/`));
+        for (const path of sourcePaths) copySourcePath(path, `${destination}${path.slice(sourceFolder.length)}`);
+        const sourceIds = elements.filter((element) => element.fileName.startsWith(`${sourceFolder}/`)).map((element) => element.id);
+        const cloned = cloneElements(elements, sourceIds).map((element) => ({ ...element, fileName: `${destination}${element.fileName.slice(sourceFolder.length)}` }));
+        setElements((previous) => [...previous, ...cloned]);
+        setCustomFolders((previous) => [...previous, ...customFolders.filter((folder) => folder.startsWith(`${sourceFolder}/`)).map((folder) => `${destination}${folder.slice(sourceFolder.length)}`), destination]);
+        showNotice(`${tx('Создана копия папки', 'Folder copy created')} ${destination}`);
+      }
     }
+  };
+
+  const handleDeleteFolder = (folderName: string) => setDeleteFolderConfirm(folderName);
+
+  const handleConfirmDeleteFolder = () => {
+    if (!deleteFolderConfirm) return;
+    const folder = deleteFolderConfirm;
+    const paths = files.filter((path) => path.startsWith(`${folder}/`));
+    const ids = elements.filter((element) => paths.includes(element.fileName)).map((element) => element.id);
+    for (const path of paths) removeSourcePath(path);
+    setElements((previous) => deleteElements(previous, ids));
+    setCustomFolders((previous) => previous.filter((path) => path !== folder && !path.startsWith(`${folder}/`)));
+    setStarredItems((previous) => new Set([...previous].filter((item) => item !== folder && !item.startsWith(`${folder}/`))));
+    if (activeFile.startsWith(`${folder}/`)) { setActiveFile(files.find((path) => !path.startsWith(`${folder}/`)) || ''); setSelectedId(null); }
+    showNotice(`${tx('Папка', 'Folder')} ${folder} ${tx('и её файлы удалены', 'and its files were deleted')}`);
+    setDeleteFolderConfirm(null);
   };
 
   const handleDuplicate = (target: KbContextMenuTarget) => {
     if (target.type === 'element') {
       const sourceEl = elements.find((e) => e.id === target.elementId);
       if (!sourceEl) return;
-      const uniqueSuffix = Date.now().toString().slice(-4);
-      const newId = `${sourceEl.id}_copy_${uniqueSuffix}`;
-      const cloned: PlanElement = {
-        ...JSON.parse(JSON.stringify(sourceEl)),
-        id: newId,
-        title: `${sourceEl.title} (Копия)`,
-        position: {
-          x: (sourceEl.position?.x || 100) + 40,
-          y: (sourceEl.position?.y || 100) + 40,
-        },
-      };
+      const cloned = cloneElements(elements, [sourceEl.id])[0];
+      const newId = cloned.id;
+      cloned.title = `${sourceEl.title} (Копия)`;
       setElements((prev) => [...prev, cloned]);
       setSelectedId(newId);
       setAiContextIds([newId]);
-      showNotice(`Дублирован элемент ${newId}`);
+      showNotice(`${tx('Дублирован элемент', 'Element duplicated')} ${newId}`);
     } else if (target.type === 'file') {
       const sourceFile = target.fileName;
       const fileElems = elements.filter((e) => e.fileName === sourceFile);
-      const baseName = sourceFile.replace('.pgr', '');
-      const uniqueSuffix = Date.now().toString().slice(-4);
-      const newFileName = `${baseName}_copy_${uniqueSuffix}.pgr`;
-      const clonedElements: PlanElement[] = fileElems.map((el) => ({
-        ...JSON.parse(JSON.stringify(el)),
-        id: `${el.id}_c${uniqueSuffix}`,
-        fileName: newFileName,
-        position: {
-          x: (el.position?.x || 100) + 30,
-          y: (el.position?.y || 100) + 30,
-        },
-      }));
-      setFiles((prev) => [...prev, newFileName]);
+      const baseName = sourceFile.split('/').pop()?.replace(/\.pgr$/i, '') || 'plan';
+      let suffix = 1;
+      let newFileName = `${baseName}_copy.pgr`;
+      while (files.includes(newFileName)) newFileName = `${baseName}_copy${suffix++}.pgr`;
+      const clonedElements = cloneElements(elements, fileElems.map((el) => el.id), newFileName);
+      workspace.copySourcePath(sourceFile, newFileName);
       setElements((prev) => [...prev, ...clonedElements]);
       setActiveFile(newFileName);
-      showNotice(`Дублирован файл ${newFileName}`);
+      showNotice(`${tx('Дублирован файл', 'File duplicated')} ${newFileName}`);
+    } else if (target.type === 'folder') {
+      const sourceFolder = target.folderName;
+      const base = sourceFolder.split('/').pop() || sourceFolder;
+      let destination = `${base}_copy`;
+      let suffix = 1;
+      while (customFolders.includes(destination) || files.some((path) => path.startsWith(`${destination}/`))) destination = `${base}_copy${suffix++}`;
+      const sourcePaths = files.filter((path) => path.startsWith(`${sourceFolder}/`));
+      for (const path of sourcePaths) copySourcePath(path, `${destination}${path.slice(sourceFolder.length)}`);
+      const sourceIds = elements.filter((element) => element.fileName.startsWith(`${sourceFolder}/`)).map((element) => element.id);
+      const cloned = cloneElements(elements, sourceIds).map((element) => ({ ...element, fileName: `${destination}${element.fileName.slice(sourceFolder.length)}` }));
+      setElements((previous) => [...previous, ...cloned]);
+      setCustomFolders((previous) => [...previous, ...customFolders.filter((folder) => folder.startsWith(`${sourceFolder}/`)).map((folder) => `${destination}${folder.slice(sourceFolder.length)}`), destination]);
+      showNotice(`${tx('Дублирована папка', 'Folder duplicated')} ${destination}`);
     }
   };
 
-  const handleShowInExplorer = (target: KbContextMenuTarget) => {
+  const handleShowInExplorer = async (target: KbContextMenuTarget) => {
+    if (!isDesktop()) {
+      showNotice(tx('Показать путь в Проводнике можно в настольном приложении.', 'Reveal in File Explorer is available in the desktop app.'));
+      return;
+    }
+    const path = target.type === 'element' || target.type === 'file'
+      ? target.fileName
+      : target.type === 'folder'
+        ? target.folderName
+        : '';
     if (target.type === 'element') {
       setActiveFile(target.fileName);
       setSelectedId(target.elementId);
@@ -1845,7 +1459,6 @@ export function App() {
         const folder = target.fileName.split('/')[0];
         setCollapsedFolders((prev) => ({ ...prev, [folder]: false }));
       }
-      showNotice(`Выбран элемент: ${target.elementId}`);
     } else if (target.type === 'file') {
       setActiveFile(target.fileName);
       setCollapsedFiles((prev) => ({ ...prev, [target.fileName]: false }));
@@ -1853,13 +1466,19 @@ export function App() {
         const folder = target.fileName.split('/')[0];
         setCollapsedFolders((prev) => ({ ...prev, [folder]: false }));
       }
-      showNotice(`Открыт файл: ${target.fileName}`);
     } else if (target.type === 'folder') {
       setCollapsedFolders((prev) => ({ ...prev, [target.folderName]: false }));
-      showNotice(`Открыта папка: ${target.folderName}/`);
     } else {
       setCollapsedFolders((prev) => ({ ...prev, __root__: false }));
-      showNotice(`Корневая папка проекта: ${projectRootFolder}/`);
+    }
+    try {
+      await revealWorkspacePath(path);
+      const label = target.type === 'element'
+        ? target.elementId
+        : path || projectRootFolder;
+      showNotice(`${tx('Открыто в Проводнике', 'Opened in File Explorer')}: ${label}`);
+    } catch (cause) {
+      showNotice(`${tx('Не удалось открыть в Проводнике', 'Could not open in File Explorer')}: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
   };
 
@@ -1890,7 +1509,7 @@ export function App() {
       navigator.clipboard.writeText(path);
     }
     showNotice(
-      `${mode === 'full' ? 'Полный' : 'Относительный'} путь скопирован: ${path}`
+      `${mode === 'full' ? tx('Полный', 'Full') : tx('Относительный', 'Relative')} ${tx('путь скопирован', 'path copied')}: ${path}`
     );
   };
 
@@ -1959,18 +1578,16 @@ export function App() {
 
   // Run analysis when elements or selected context change
   useEffect(() => {
-    const local = generateLocalAnalysis(elements, aiContextIds, files);
-    setProposals(local.proposals);
+    const schemaIssues = inspectGraphSchemaIssues(elements, files, locale);
     setContradictions(
-      local.contradictions.filter(
+      schemaIssues.filter(
         (c) =>
           !ignoredContradictionIds.includes(c.id) &&
           !rejectedContradictionIds.includes(c.id)
       )
     );
-    setInterviewQuestions(
-      generateLocalInterviewQuestions(elements, aiContextIds)
-    );
+    setProposals([]);
+    setInterviewQuestions([]);
   }, [
     elements,
     aiContextIds,
@@ -1993,9 +1610,6 @@ export function App() {
     setConflictFormTitle(first.title);
     setConflictFormDesc(first.description);
     setConflictFormFix(first.resolutionHint);
-    setConflictFormFixLabel(
-      first.suggestedFix?.fixLabel || 'Применить исправление в план'
-    );
     setConflictFormComment('');
   };
 
@@ -2010,9 +1624,6 @@ export function App() {
     setConflictFormTitle(item.title);
     setConflictFormDesc(item.description);
     setConflictFormFix(item.resolutionHint);
-    setConflictFormFixLabel(
-      item.suggestedFix?.fixLabel || 'Применить исправление в план'
-    );
     setConflictFormComment('');
   };
 
@@ -2021,30 +1632,29 @@ export function App() {
     const current =
       activeConflictPopup.contradictions[activeConflictPopup.activeIndex];
     if (!current) return;
+    if (!current.suggestedFix) {
+      showNotice(tx('Для этого конфликта нет проверенного патча. Исправьте ссылку вручную или отклоните конфликт.', 'There is no verified patch for this conflict. Edit the reference manually or reject the finding.'));
+      return;
+    }
 
-    const targetId =
-      current.suggestedFix?.targetElementId || current.elementIds[0];
+    const targetId = current.suggestedFix.targetElementId;
+    if (!elements.some((element) => element.id === targetId)) {
+      showNotice(tx('Целевой элемент исправления больше не существует.', 'The fix target no longer exists.'));
+      return;
+    }
     setElements((prev) =>
       prev.map((el) => {
         if (el.id !== targetId) return el;
-        const patched: PlanElement = {
+        return {
           ...el,
-          ...(current.suggestedFix?.patch || {}),
+          ...current.suggestedFix!.patch,
         };
-        if (
-          conflictFormFix.trim() &&
-          conflictFormFix.trim() !== current.resolutionHint.trim()
-        ) {
-          patched.description = `${patched.description} [Исправление: ${conflictFormFix.trim()}]`;
-        }
-        return patched;
       })
     );
     setContradictions((prev) => prev.filter((c) => c.id !== current.id));
-    setUncommittedChanges((c) => c + 1);
     setActiveConflictPopup(null);
     showNotice(
-      `Конфликт исправлен: ${conflictFormFixLabel || current.title}`
+      `${tx('Применён проверенный патч', 'Verified patch applied')}: ${current.suggestedFix.fixLabel || current.title}`
     );
   };
 
@@ -2061,7 +1671,7 @@ export function App() {
       const rejIdea: PlanElement = {
         id: `idea_conflict_rej_${Date.now().toString().slice(-3)}`,
         type: 'idea',
-        title: `Отклонён конфликт: ${conflictFormTitle || current.title}`,
+        title: `${tx('Отклонён конфликт', 'Rejected conflict')}: ${conflictFormTitle || current.title}`,
         fileName: ideaFile,
         parent: '-',
         description: conflictFormDesc || current.description,
@@ -2076,7 +1686,6 @@ export function App() {
         altReason: conflictFormComment.trim(),
       };
       setElements((prev) => [...prev, rejIdea]);
-      setUncommittedChanges((c) => c + 1);
     }
 
     setRejectedContradictionIds((prev) =>
@@ -2084,7 +1693,7 @@ export function App() {
     );
     setContradictions((prev) => prev.filter((c) => c.id !== current.id));
     setActiveConflictPopup(null);
-    showNotice(`Конфликт отклонён: ${conflictFormTitle || current.title}`);
+    showNotice(`${tx('Конфликт отклонён', 'Conflict rejected')}: ${conflictFormTitle || current.title}`);
   };
 
   const handleIgnoreConflict = () => {
@@ -2099,15 +1708,15 @@ export function App() {
     setContradictions((prev) => prev.filter((c) => c.id !== current.id));
     setActiveConflictPopup(null);
     showNotice(
-      `Конфликт скрыт (игнорируется): ${conflictFormTitle || current.title}`
+      `${tx('Конфликт скрыт (игнорируется)', 'Conflict hidden (ignored)')}: ${conflictFormTitle || current.title}`
     );
   };
 
   const canvasVisibleContradictions = useMemo(() => {
-    if (!aiEnabled || !showCanvasConflictOverlay) return [];
+    if (!showCanvasConflictOverlay) return [];
     if (canvasConflictFilter === 'all') return contradictions;
     return contradictions.filter((c) => c.id === canvasConflictFilter);
-  }, [aiEnabled, showCanvasConflictOverlay, canvasConflictFilter, contradictions]);
+  }, [showCanvasConflictOverlay, canvasConflictFilter, contradictions]);
 
   const getRadialOptions = (
     mode: 'canvas' | 'node',
@@ -2126,15 +1735,15 @@ export function App() {
       return [
         {
           id: 'node_transform',
-          label: 'Преобразовать',
-          sublabel: 'В систему',
+          label: tx('Преобразовать', 'Transform'),
+          sublabel: tx('В систему', 'Into system'),
           startDeg: -90,
           endDeg: 0,
           angleDeg: -45,
         },
         {
           id: 'node_open_kb',
-          label: 'Открыть в БЗ',
+          label: tx('Открыть в БЗ', 'Open in Knowledge Base'),
           sublabel: targetEl?.fileName || '.pgr',
           startDeg: 0,
           endDeg: 90,
@@ -2142,16 +1751,16 @@ export function App() {
         },
         {
           id: 'node_save_lib',
-          label: 'В библиотеку',
-          sublabel: 'Сохранить',
+          label: tx('В библиотеку', 'To library'),
+          sublabel: tx('Сохранить', 'Save'),
           startDeg: 90,
           endDeg: 180,
           angleDeg: 135,
         },
         {
           id: 'node_delete',
-          label: 'Удалить',
-          sublabel: 'Из проекта',
+          label: tx('Удалить', 'Delete'),
+          sublabel: tx('Из проекта', 'From project'),
           startDeg: -180,
           endDeg: -90,
           angleDeg: -135,
@@ -2163,8 +1772,8 @@ export function App() {
     return [
       {
         id: 'conflicts',
-        label: 'Конфликты',
-        sublabel: `${contradictions.length} активн.`,
+        label: tx('Конфликты', 'Conflicts'),
+        sublabel: `${contradictions.length} ${tx('активн.', 'active')}`,
         startDeg: -90,
         endDeg: 0,
         angleDeg: -45,
@@ -2172,24 +1781,24 @@ export function App() {
       },
       {
         id: 'proposals',
-        label: 'Предложения',
-        sublabel: `${proposals.length} карточ.`,
+        label: tx('Предложения', 'Proposals'),
+        sublabel: `${proposals.length} ${tx('карточ.', 'cards')}`,
         startDeg: 0,
         endDeg: 90,
         angleDeg: 45,
       },
       {
         id: 'interview',
-        label: 'Интервью',
-        sublabel: `${interviewQuestions.length} вопр.`,
+        label: tx('Интервью', 'Interview'),
+        sublabel: `${interviewQuestions.length} ${tx('вопр.', 'questions')}`,
         startDeg: 90,
         endDeg: 180,
         angleDeg: 135,
       },
       {
         id: 'rescan',
-        label: 'Обновить ИИ',
-        sublabel: 'Скан плана',
+        label: tx('Обновить ИИ', 'Refresh AI'),
+        sublabel: tx('Скан плана', 'Scan plan'),
         startDeg: -180,
         endDeg: -90,
         angleDeg: -135,
@@ -2214,12 +1823,12 @@ export function App() {
         setTransformSourceId(targetEl.id);
         setTransformSummary(null);
         setAiActiveModal('transform');
-        showNotice(`Преобразование элемента: ${targetEl.id}`);
+        showNotice(`${tx('Преобразование элемента', 'Transform element')}: ${targetEl.id}`);
       } else if (optionId === 'node_open_kb') {
         setSelectedId(targetEl.id);
         setActiveFile(targetEl.fileName);
         setActiveTab('kb');
-        showNotice(`Открыт элемент ${targetEl.id} в Базе знаний`);
+        showNotice(`${tx('Открыт элемент', 'Opened element')} ${targetEl.id} ${tx('в Базе знаний', 'in Knowledge Base')}`);
       } else if (optionId === 'node_save_lib') {
         handleSaveCurrentToLibrary(targetEl);
       } else if (optionId === 'node_delete') {
@@ -2239,8 +1848,7 @@ export function App() {
         if (selectedId === targetEl.id) {
           setSelectedId(null);
         }
-        setUncommittedChanges((c) => c + 1);
-        showNotice(`Элемент ${targetEl.id} удалён с Холста`);
+        showNotice(`${tx('Элемент', 'Element')} ${targetEl.id} ${tx('удалён с Холста', 'deleted from Canvas')}`);
       }
       return;
     }
@@ -2255,28 +1863,20 @@ export function App() {
         openConflictPopupFor(contradictions, contradictions[0].elementIds[0]);
       } else {
         setAiActiveModal('contradictions');
-        showNotice('Активных конфликтов на холсте не обнаружено');
+        showNotice(tx('Активных конфликтов на холсте не обнаружено', 'No active conflicts found on the canvas'));
       }
     } else if (optionId === 'proposals') {
       setAiActiveModal('proposals');
-      showNotice('Открыты карточки-предложения ИИ');
+      void runAiAnalysis();
     } else if (optionId === 'interview') {
       setAiActiveModal('interview');
-      showNotice('Открыто проблемное архитектурное интервью');
+      void runProblemInterview();
     } else if (optionId === 'rescan') {
       setIgnoredContradictionIds([]);
       setRejectedContradictionIds([]);
       setShowCanvasConflictOverlay(true);
       setCanvasConflictFilter('all');
-      const local = generateLocalAnalysis(elements, aiContextIds, files);
-      setProposals(local.proposals);
-      setContradictions(local.contradictions);
-      setInterviewQuestions(
-        generateLocalInterviewQuestions(elements, aiContextIds)
-      );
-      showNotice(
-        `Анализ обновлён: конфликтов ${local.contradictions.length}, предложений ${local.proposals.length}`
-      );
+      void runAiAnalysis();
     }
   };
   const executeRadialAiActionRef = useRef(executeRadialAiAction);
@@ -2408,6 +2008,15 @@ export function App() {
     return { nodes, activeEdges, posMap, width: W, height: H };
   }, [miniGraphLayout, selectedId, graphSpread]);
 
+  const miniGraphEdgeOffsets = useMemo(
+    () => getParallelEdgeOffsets(miniGraphLayout.activeEdges),
+    [miniGraphLayout.activeEdges]
+  );
+  const mainGraphEdgeOffsets = useMemo(
+    () => getParallelEdgeOffsets(mainGraphLayout.activeEdges),
+    [mainGraphLayout.activeEdges]
+  );
+
   const selectedElement = useMemo(
     () =>
       selectedId ? elements.find((e) => e.id === selectedId) || null : null,
@@ -2426,15 +2035,47 @@ export function App() {
     );
     return found || { startLine: 1, endLine: 24 };
   }, [selectedElement, activeFileData]);
+  const rangeFilterFileName = selectedElement?.fileName || activeFile;
+  const activeLineRangeFilter = lineRangeFilter?.fileName === rangeFilterFileName ? lineRangeFilter : null;
 
   const [rawPgrDraft, setRawPgrDraft] = useState<string>('');
   useEffect(() => {
-    setRawPgrDraft(activeFileData.content);
-  }, [activeFileData.content]);
+    const rawSource = workspace.sourceContents[activeFile || files[0] || ''];
+    setRawPgrDraft(rawSource ?? activeFileData.content);
+  }, [activeFileData.content, activeFile, files, workspace.sourceContents]);
+  const rawPgrLines = useMemo(() => rawPgrDraft.split(/\r\n|\n|\r/), [rawPgrDraft]);
+  useEffect(() => {
+    const citedRange = lineRangeFilter?.fileName === rangeFilterFileName ? lineRangeFilter : null;
+    if (citedRange) {
+      setRangeStartInput(String(citedRange.start));
+      setRangeEndInput(String(citedRange.end));
+      return;
+    }
+
+    const source = workspace.sourceContents[rangeFilterFileName]
+      ?? serializeFileWithRanges(elements, rangeFilterFileName).content;
+    const lineCount = source.split(/\r\n|\n|\r/).length;
+    setRangeStartInput('1');
+    setRangeEndInput(String(Math.min(24, lineCount)));
+  }, [rangeFilterFileName, lineRangeFilter?.fileName, lineRangeFilter?.start, lineRangeFilter?.end]);
+  const requestedLineRange = useMemo(
+    () => parseLineRange(rangeStartInput, rangeEndInput, rawPgrLines.length),
+    [rangeStartInput, rangeEndInput, rawPgrLines.length],
+  );
+
+  const updateRawPgrDraft = (fileName: string, content: string) => {
+    setRawPgrDraft(content);
+    let diagnostic: string | null = null;
+    try {
+      parsePgrFileContent(content, fileName, elements);
+    } catch (cause) {
+      diagnostic = cause instanceof Error ? cause.message : String(cause);
+    }
+    workspace.stageSource(fileName, content, diagnostic);
+  };
 
   const updateElement = (updated: PlanElement) => {
     setElements((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
-    setUncommittedChanges((c) => c + 1);
   };
 
   const usedByIds = useMemo(() => {
@@ -2459,45 +2100,50 @@ export function App() {
   }, [selectedElement, elements]);
 
   const handleConnectOnCanvas = (sourceId: string, targetId: string) => {
-    const src = elements.find((e) => e.id === sourceId);
-    const tgt = elements.find((e) => e.id === targetId);
-    if (!src || !tgt || sourceId === targetId) return;
-
-    if (src.type === 'system' && tgt.type !== 'system') {
-      updateElement({ ...tgt, parent: src.id });
-      showNotice(`contains: ${tgt.id} → parent: ${src.id}`);
-    } else if (src.type === 'class' && tgt.type === 'class') {
-      updateElement({ ...src, extendsId: tgt.id });
-      showNotice(`extends: ${src.id} → ${tgt.id}`);
-    } else if (src.type === 'object' && tgt.type === 'class') {
-      updateElement({ ...src, instanceOf: tgt.id });
-      showNotice(`instance_of: ${src.id} → ${tgt.id}`);
-    } else if (
-      ['class', 'process', 'component', 'object'].includes(src.type) &&
-      tgt.type === 'component'
-    ) {
-      const next = Array.from(new Set([...(src.components || []), tgt.id]));
-      updateElement({ ...src, components: next });
-      showNotice(`has: ${src.id} → ${tgt.id}`);
-    } else if (src.type === 'idea') {
-      const next = Array.from(new Set([...(src.notes || []), tgt.id]));
-      updateElement({ ...src, notes: next });
-      showNotice(`notes: ${src.id} → ${tgt.id}`);
-    } else if (src.type === 'process' || src.type === 'class') {
-      const next = Array.from(new Set([...(src.uses || []), tgt.id]));
-      updateElement({ ...src, uses: next });
-      showNotice(`uses: ${src.id} → ${tgt.id}`);
-    } else {
-      showNotice('Для выбранной пары типов связь не предусмотрена');
+    const result = toggleCanvasRelation(elements, sourceId, targetId);
+    if (!result) {
+      showNotice(tx('Для выбранной пары типов связь не предусмотрена', 'A relation is not defined for this pair of element types'));
+      return;
     }
+    updateElement(result.updatedElement);
+    const relationLabel: Record<RelationType, string> = {
+      contains: tx('содержит', 'contains'),
+      extends: tx('наследует', 'extends'),
+      has: tx('имеет', 'has'),
+      instance_of: tx('экземпляр', 'instance of'),
+      uses: tx('использует', 'uses'),
+      notes: tx('заметка', 'notes'),
+    };
+    const action = result.removed ? tx('Удалена связь', 'Removed relation') : tx('Добавлена связь', 'Added relation');
+    showNotice(`${action} ${relationLabel[result.relation]}: ${sourceId} → ${targetId}`);
+  };
+
+  const handleApplySuggestedFix = (contradiction: AiContradiction) => {
+    const suggestedFix = contradiction.suggestedFix;
+    if (!suggestedFix) return;
+    const { targetElementId, patch } = suggestedFix;
+    setElements((previous) => previous.map((element) => (
+      element.id === targetElementId ? { ...element, ...patch } : element
+    )));
+    setContradictions((previous) => previous.filter((item) => item.id !== contradiction.id));
+    showNotice(`${tx('Противоречие в', 'Contradiction in')} ${targetElementId} ${tx('исправлено', 'fixed')}`);
   };
 
   const handleApplyProposal = (prop: AiProposalCard) => {
-    if (prop.suggestedElement) {
+    if (!prop.suggestedElement) {
+      showNotice(tx('Для этого предложения нет проверенного элемента для добавления. Создайте новый анализ после получения структурированных данных.', 'This proposal has no validated element to add. Run the analysis again after receiving structured data.'));
+      return;
+    }
+    {
       const se = prop.suggestedElement;
-      const targetFile = se.fileName || activeFile || 'sys_inventory.pgr';
-      if (!files.includes(targetFile)) {
-        setFiles((prev) => [...prev, targetFile]);
+      const targetFile = se.fileName || activeFile || files[0] || 'sys_core.pgr';
+      if (elements.some((element) => element.id === se.id)) {
+        showNotice(tx('ID предложенного элемента уже существует. Обновите анализ и проверьте предложение снова.', 'The proposed element ID already exists. Refresh the analysis and review the proposal again.'));
+        return;
+      }
+      if (prop.targetElementId && !elements.some((element) => element.id === prop.targetElementId)) {
+        showNotice(tx('Целевой элемент больше не существует. Обновите анализ и проверьте предложение снова.', 'The target element no longer exists. Refresh the analysis and review the proposal again.'));
+        return;
       }
       const created: PlanElement = {
         id: se.id,
@@ -2517,6 +2163,16 @@ export function App() {
         instanceOf: se.instanceOf,
         values: se.values,
       };
+      const previewGraph = buildAndValidateGraph([...elements, created]);
+      const invalidCandidate = previewGraph.warnings.some((warning) => warning.elementId === created.id) ||
+        previewGraph.edges.some((edge) => edge.source === created.id && !edge.valid);
+      if (invalidCandidate) {
+        showNotice(tx('Связи предложенного элемента больше невалидны. Обновите анализ и проверьте предложение снова.', 'The proposed element references are no longer valid. Refresh the analysis and review the proposal again.'));
+        return;
+      }
+      if (!files.includes(targetFile)) {
+        setFiles((prev) => [...prev, targetFile]);
+      }
       setElements((prev) => {
         const next = [...prev.filter((x) => x.id !== created.id), created];
         if (created.type === 'component' && prop.targetElementId) {
@@ -2534,14 +2190,17 @@ export function App() {
         return next;
       });
       setSelectedId(created.id);
-      setUncommittedChanges((c) => c + 1);
-      showNotice(`Применено предложение: добавлен ${created.id}`);
+      showNotice(`${tx('Применено предложение: добавлен', 'Proposal applied: added')} ${created.id}`);
     }
     setProposals((prev) => prev.filter((p) => p.id !== prop.id));
   };
 
   const handleConfirmRejectProposal = () => {
     if (!rejectProposalModal) return;
+    if (!rejectReasonInput.trim()) {
+      showNotice(tx('Укажите причину отклонения, чтобы сохранить её в плане.', 'Enter a rejection reason to save it to the plan.'));
+      return;
+    }
     const prop = rejectProposalModal;
     const ideaFile = files.includes('idea_backlog.pgr')
       ? 'idea_backlog.pgr'
@@ -2561,55 +2220,118 @@ export function App() {
       position: { x: 40, y: 460 },
       notes: prop.targetElementId ? [prop.targetElementId] : [],
       altTo: prop.targetElementId || '-',
-      altReason:
-        rejectReasonInput.trim() || 'Отклонено пользователем при ревью плана',
+      altReason: rejectReasonInput.trim(),
     };
     setElements((prev) => [...prev, rejIdea]);
     setProposals((prev) => prev.filter((p) => p.id !== prop.id));
     setRejectProposalModal(null);
     setRejectReasonInput('');
-    setUncommittedChanges((c) => c + 1);
-    showNotice(`Отклонённый вариант сохранён как Идея-образ (${rejIdea.id})`);
+      showNotice(`${tx('Отклонённый вариант сохранён как Идея-образ', 'Rejected option saved as an Idea')} (${rejIdea.id})`);
   };
 
   const handleSaveCurrentToLibrary = (elToSave?: PlanElement | null) => {
     const target = elToSave || selectedElement;
     if (!target) return;
+    setLibraryIconDraft(defaultLibraryIcon(target.type));
+    setLibrarySaveQueue((previous) => [...previous, target]);
+  };
+
+  const handleQueueLibrarySave = (targets: PlanElement[]) => {
+    if (targets.length === 0) return;
+    const knownIds = new Set([
+      ...unitLibrary.map((item) => item.element.id),
+      ...librarySaveQueue.map((element) => element.id),
+    ]);
+    const uniqueTargets = targets.filter((target) => {
+      if (knownIds.has(target.id)) return false;
+      knownIds.add(target.id);
+      return true;
+    });
+    if (uniqueTargets.length === 0) {
+      showNotice(tx('Эти элементы уже есть в библиотеке или ожидают сохранения', 'These elements are already in the library or queued for saving'));
+      return;
+    }
+    setLibraryIconDraft(defaultLibraryIcon(uniqueTargets[0].type));
+    setLibrarySaveQueue((previous) => [...previous, ...uniqueTargets]);
+  };
+
+  const handleToggleFileLibrary = (fileName: string) => {
+    const fileElements = elements.filter((element) => element.fileName === fileName);
+    if (fileElements.length === 0) {
+      showNotice(tx('В файле нет элементов для сохранения', 'This file has no elements to save'));
+      return;
+    }
+
+    const elementIds = new Set(fileElements.map((element) => element.id));
+    const savedIds = new Set(unitLibrary.filter((item) => elementIds.has(item.element.id)).map((item) => item.element.id));
+    const missingElements = fileElements.filter((element) => !savedIds.has(element.id));
+
+    if (missingElements.length === 0) {
+      const removedCount = unitLibrary.filter((item) => elementIds.has(item.element.id)).length;
+      setUnitLibrary((previous) => previous.filter((item) => !elementIds.has(item.element.id)));
+      showNotice(`${tx('Удалено из Библиотеки юнитов', 'Removed from the Unit Library')}: ${removedCount} · ${fileName}`);
+      return;
+    }
+
+    handleQueueLibrarySave(missingElements);
+  };
+
+  const handleToggleElementLibrary = (elementId: string) => {
+    const target = elements.find((element) => element.id === elementId);
+    if (!target) {
+      showNotice(tx('Элемент больше не существует', 'This element no longer exists'));
+      return;
+    }
+
+    const savedUnits = unitLibrary.filter((item) => item.element.id === elementId);
+    if (savedUnits.length > 0) {
+      setUnitLibrary((previous) => previous.filter((item) => item.element.id !== elementId));
+      showNotice(`${tx('Элемент удалён из Библиотеки юнитов', 'Element removed from the Unit Library')}: ${elementId}`);
+      return;
+    }
+
+    handleQueueLibrarySave([target]);
+  };
+
+  const handleConfirmLibrarySave = (iconName = libraryIconDraft) => {
+    const target = librarySaveQueue[0];
+    if (!target) return;
     const { fileName: _f, position: _p, ...rest } = target;
     const newUnit: UnitLibraryItem = {
       unitId: `unit_${target.id}_${Date.now()}`,
       category: `${TYPE_HEADERS_RU[target.type]} · из текущего проекта`,
-      savedAt: 'Сохранено только что',
+      savedAt: new Date().toISOString(),
+      iconName,
       element: rest,
     };
     setUnitLibrary((prev) => [newUnit, ...prev]);
-    showNotice(`Элемент ${target.id} сохранён в Библиотеку юнитов`);
+    showNotice(`${tx('Элемент', 'Element')} ${target.id} ${tx('сохранён в Библиотеку юнитов', 'saved to the Unit Library')}`);
+    const next = librarySaveQueue[1];
+    if (next) setLibraryIconDraft(defaultLibraryIcon(next.type));
+    setLibrarySaveQueue((previous) => previous.slice(1));
   };
 
   const handleAddUnitToProject = (unit: UnitLibraryItem) => {
-    const targetFile = activeFile || files[0] || 'sys_inventory.pgr';
-    if (!files.includes(targetFile)) {
-      setFiles([targetFile]);
+    const targetFile = activeFile || files[0] || 'sys_core.pgr';
+    try {
+      const prepared = prepareLibraryInsert(unit, elements, targetFile);
+      const newEl: PlanElement = {
+        ...prepared.element,
+        position: {
+          x: 280 + (elements.length % 3) * 220,
+          y: 40 + Math.floor(elements.length / 3) * 140,
+        },
+      };
+      setFiles((previous) => previous.includes(targetFile) ? previous : [...previous, targetFile]);
       setActiveFile(targetFile);
+      setElements((previous) => [...previous, newEl]);
+      setSelectedId(newEl.id);
+      showNotice(prepared.warnings.length > 0
+        ? `${tx('Юнит добавлен с предупреждениями', 'Unit added with warnings')}: ${newEl.id}; ${prepared.warnings.length} ${tx('связей не перенесено', 'references could not be kept')}`
+        : `${tx('Юнит', 'Unit')} ${newEl.id} ${tx('добавлен в проект', 'added to the project')} (${targetFile})`);
+    } catch (cause) {
+      showNotice(`${tx('Юнит не добавлен', 'Unit was not added')}: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
-    const exists = elements.some((e) => e.id === unit.element.id);
-    const finalId = exists
-      ? `${unit.element.id}_${elements.length + 1}`
-      : unit.element.id;
-
-    const newEl: PlanElement = {
-      ...unit.element,
-      id: finalId,
-      fileName: targetFile,
-      position: {
-        x: 280 + (elements.length % 3) * 220,
-        y: 40 + Math.floor(elements.length / 3) * 140,
-      },
-    };
-    setElements((prev) => [...prev, newEl]);
-    setSelectedId(newEl.id);
-    setUncommittedChanges((c) => c + 1);
-    showNotice(`Юнит ${newEl.id} добавлен в проект (${targetFile})`);
   };
 
   const handleCreateElement = () => {
@@ -2622,7 +2344,16 @@ export function App() {
         .replace(/^(sys_|cls_|proc_|cmp_|obj_|idea_)/, '') ||
       `elem_${elements.length + 1}`;
     const finalId = `${prefix}${cleanSlug}`;
-    const targetFile = newElFile || activeFile || 'sys_inventory.pgr';
+    const targetFile = newElFile || activeFile || files[0] || 'sys_core.pgr';
+
+    if (elements.some((element) => element.id === finalId)) {
+      showNotice(`${tx('ID', 'ID')} ${finalId} ${tx('уже существует', 'already exists')}`);
+      return;
+    }
+    if (newElType !== 'system' && newElParent !== '-' && !elements.some((element) => element.id === newElParent && element.type === 'system')) {
+      showNotice(tx('Выбранная родительская система больше не существует', 'The selected parent system no longer exists'));
+      return;
+    }
 
     if (!files.includes(targetFile)) {
       setFiles((prev) => [...prev, targetFile]);
@@ -2631,30 +2362,20 @@ export function App() {
     const created: PlanElement = {
       id: finalId,
       type: newElType,
-      title: newElTitle.trim() || `${TYPE_HEADERS_RU[newElType]} ${finalId}`,
+      title: newElTitle.trim() || finalId,
       fileName: targetFile,
       parent: newElType === 'system' ? '-' : newElParent || '-',
-      description: 'Описание элемента плана.',
+      description: '',
       status: 'черновик',
       mvp: newElMvp,
       position: { x: 280, y: 180 },
       extendsId: newElType === 'class' ? '-' : undefined,
-      fields:
-        newElType === 'class'
-          ? [{ name: 'name', dataType: 'string', description: 'имя' }]
-          : undefined,
-      methods:
-        newElType === 'class'
-          ? [{ visibility: '+', signature: 'execute()', description: 'вызвать' }]
-          : undefined,
-      steps: newElType === 'process' ? ['Выполнить действие'] : undefined,
-      interfaceItems:
-        newElType === 'component'
-          ? ['value: int — параметр компонента']
-          : undefined,
-      internalLogic:
-        newElType === 'component' ? ['Правило внутренней логики'] : undefined,
-      instanceOf: newElType === 'object' ? 'cls_item' : undefined,
+      fields: newElType === 'class' ? [] : undefined,
+      methods: newElType === 'class' ? [] : undefined,
+      steps: newElType === 'process' ? [] : undefined,
+      interfaceItems: newElType === 'component' ? [] : undefined,
+      internalLogic: newElType === 'component' ? [] : undefined,
+      instanceOf: newElType === 'object' ? '-' : undefined,
       values: newElType === 'object' ? [] : undefined,
       notes: newElType === 'idea' ? [] : undefined,
     };
@@ -2665,52 +2386,47 @@ export function App() {
     setNewElementModalOpen(false);
     setNewElTitle('');
     setNewElSlug('');
-    setUncommittedChanges((c) => c + 1);
-    showNotice(`Создан элемент ${created.id}`);
+    showNotice(`${tx('Создан элемент', 'Element created')} ${created.id}`);
   };
 
-  const renderExplorerFileItem = (fileName: string, isNested?: boolean) => {
-    const fileElems = filteredElements.filter((e) => e.fileName === fileName);
-    const isFileActive = (selectedElement?.fileName || activeFile) === fileName;
-    const isDragTarget = dragOverFileName === fileName;
-    const isFileCollapsed = Boolean(collapsedFiles[fileName]);
-    const isStarred = starredItems.has(fileName);
-    const shortName =
-      isNested && fileName.includes('/')
-        ? fileName.split('/').slice(1).join('/')
-        : fileName;
-
+  const renderExplorerFileItem = (fileName: string, isNested = false) => {
+    const fileElements = filteredElements.filter((element) => element.fileName === fileName);
     return (
-      <div
+      <ExplorerFileEntry
         key={fileName}
-        onContextMenu={(e) =>
-          handleOpenContextMenu(e, { type: 'file', fileName })
-        }
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          if (dragOverFileName !== fileName) {
-            setDragOverFileName(fileName);
+        fileName={fileName}
+        isNested={isNested}
+        fileElements={fileElements}
+        locale={locale}
+        active={(selectedElement?.fileName || activeFile) === fileName}
+        dragTarget={dragOverFileName === fileName}
+        collapsed={Boolean(collapsedFiles[fileName])}
+        selectedId={selectedId}
+        aiContextIds={aiContextIds}
+        starredItems={starredItems}
+        onContextMenu={handleOpenContextMenu}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          if (dragOverFileName !== fileName) setDragOverFileName(fileName);
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setDragOverFileName((previous) => previous === fileName ? null : previous);
           }
         }}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-            setDragOverFileName((prev) => (prev === fileName ? null : prev));
-          }
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
+        onDrop={(event) => {
+          event.preventDefault();
           setDragOverFileName(null);
-          let idsToMove: string[] =
-            kbDraggedIdsRef.current.length > 0
-              ? kbDraggedIdsRef.current
-              : kbDraggedIds;
+          let idsToMove: string[] = kbDraggedIdsRef.current.length > 0
+            ? kbDraggedIdsRef.current
+            : kbDraggedIds;
           if (idsToMove.length === 0) {
-            const raw = e.dataTransfer.getData('text/plain');
+            const raw = event.dataTransfer.getData('text/plain');
             if (raw) {
               try {
-                const parsed = JSON.parse(raw);
-                idsToMove = Array.isArray(parsed) ? parsed : [raw];
+                const parsed: unknown = JSON.parse(raw);
+                idsToMove = Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string') ? parsed : [raw];
               } catch {
                 idsToMove = [raw];
               }
@@ -2718,323 +2434,121 @@ export function App() {
           }
           kbDraggedIdsRef.current = [];
           setKbDraggedIds([]);
-          const movable = elementsRef.current.filter(
-            (el) => idsToMove.includes(el.id) && el.fileName !== fileName
-          );
+          const movable = elementsRef.current.filter((element) => idsToMove.includes(element.id) && element.fileName !== fileName);
           if (movable.length === 0) return;
-          const prevFileNames: Record<string, string> = {};
-          elementsRef.current.forEach((el) => {
-            prevFileNames[el.id] = el.fileName;
-          });
-          const moveSet = new Set(movable.map((m) => m.id));
-          const newEntry: MoveHistoryEntry = {
-            kind: 'kb_file_move',
-            fileNames: prevFileNames,
-            prevActiveFile: activeFile,
-            movedIds: movable.map((m) => m.id),
-          };
-          const nextHistory = [...moveHistoryRef.current.slice(-49), newEntry];
-          moveHistoryRef.current = nextHistory;
-          setMoveHistory(nextHistory);
-
-          const nextElements = elementsRef.current.map((el) =>
-            moveSet.has(el.id) ? { ...el, fileName } : el
-          );
+          const movedIds = new Set(movable.map((element) => element.id));
+          const nextElements = elementsRef.current.map((element) => movedIds.has(element.id) ? { ...element, fileName } : element);
           elementsRef.current = nextElements;
           setElements(nextElements);
           setActiveFile(fileName);
-          setUncommittedChanges((c) => c + 1);
-          if (
-            document.activeElement instanceof HTMLElement &&
-            (document.activeElement.tagName === 'INPUT' ||
-              document.activeElement.tagName === 'TEXTAREA' ||
-              document.activeElement.tagName === 'SELECT')
-          ) {
+          if (document.activeElement instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
             document.activeElement.blur();
           }
           if (movable.length === 1) {
-            showNotice(`Элемент ${movable[0].id} перемещён в ${fileName}`);
+            showNotice(`${tx('Элемент', 'Element')} ${movable[0].id} ${tx('перемещён в', 'moved to')} ${fileName}`);
           } else {
-            showNotice(
-              `Перемещено элементов (${movable.length}) в ${fileName}`
-            );
+            showNotice(`${tx('Перемещено элементов', 'Elements moved')} (${movable.length}) ${tx('в', 'to')} ${fileName}`);
           }
         }}
-        style={
-          isDragTarget
-            ? {
-                borderColor: 'var(--ctx-pos-text)',
-                backgroundColor: 'var(--ctx-pos-soft)',
-                boxShadow: 'inset 0 0 0 1px var(--ctx-pos-text)',
-              }
-            : undefined
-        }
-        className={`file-entry transition-colors ${
-          isNested ? 'rounded mb-1' : ''
-        } ${isFileActive ? 'active-file' : ''}`}
-      >
-        <div
-          className="file-title"
-          onClick={() => {
-            setActiveFile(fileName);
-            if (fileElems[0]) {
-              setSelectedId(fileElems[0].id);
-              setAiContextIds([fileElems[0].id]);
-            }
-          }}
-        >
-          <div className="flex items-center gap-1.5 min-w-0">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setCollapsedFiles((prev) => ({
-                  ...prev,
-                  [fileName]: !prev[fileName],
-                }));
-              }}
-              className="p-0.5 -ml-1 text-[var(--ink-muted)] hover:text-[var(--ink)] cursor-pointer rounded transition-colors flex items-center justify-center"
-              title={
-                isFileCollapsed
-                  ? 'Развернуть элементы файла'
-                  : 'Свернуть элементы файла'
-              }
-            >
-              {isFileCollapsed ? (
-                <ChevronRight size={12} />
-              ) : (
-                <ChevronDown size={12} />
-              )}
-            </button>
-            <FileText size={13} className="shrink-0 text-[var(--ink-muted)]" />
-            <span className="truncate">{shortName}</span>
-            {isStarred && (
-              <span title="Отмечено как важное" className="inline-flex items-center ml-0.5">
-                <Star
-                  size={11}
-                  style={{
-                    color: 'var(--ctx-neg-text)',
-                    fill: 'var(--ctx-neg-text)',
-                  }}
-                  className="shrink-0"
-                />
-              </span>
-            )}
-          </div>
-          <span className="mono">{fileElems.length}</span>
-        </div>
-
-        {!isFileCollapsed && (
-          <>
-            {fileElems.length === 0 && (
-              <div className="mono text-[10px] py-1.5 px-2 rounded border border-dashed border-[var(--border)] text-center text-[var(--ink-muted)]">
-                Перетащите элементы сюда
-              </div>
-            )}
-
-            {fileElems.map((el) => {
-              const isSelectedEl =
-                selectedId === el.id || aiContextIds.includes(el.id);
-              const isElStarred = starredItems.has(el.id);
-              const TypeIcon = ELEMENT_TYPE_ICONS[el.type];
-              return (
-                <div
-                  key={el.id}
-                  draggable
-                  onContextMenu={(e) =>
-                    handleOpenContextMenu(e, {
-                      type: 'element',
-                      elementId: el.id,
-                      fileName,
-                    })
-                  }
-                  onDragStart={(e) => {
-                    const currentMulti = aiContextIdsRef.current;
-                    const ids =
-                      currentMulti.includes(el.id) && currentMulti.length > 0
-                        ? currentMulti
-                        : e.ctrlKey || e.metaKey
-                        ? Array.from(new Set([...currentMulti, el.id]))
-                        : [el.id];
-                    if (!currentMulti.includes(el.id)) {
-                      selectedIdRef.current = el.id;
-                      setSelectedId(el.id);
-                      aiContextIdsRef.current = ids;
-                      setAiContextIds(ids);
-                    }
-                    kbDraggedIdsRef.current = ids;
-                    setKbDraggedIds(ids);
-                    e.dataTransfer.effectAllowed = 'move';
-                    e.dataTransfer.setData(
-                      'text/plain',
-                      ids.length === 1 ? ids[0] : JSON.stringify(ids)
-                    );
-                  }}
-                  onDragEnd={() => {
-                    kbDraggedIdsRef.current = [];
-                    setKbDraggedIds([]);
-                    setDragOverFileName(null);
-                  }}
-                  onClick={(e) => {
-                    handleSelectWithModifiers(
-                      el.id,
-                      e.ctrlKey || e.metaKey,
-                      fileName
-                    );
-                    setLineRangeFilter(null);
-                  }}
-                  title="ЛКМ — выбрать, Ctrl+ЛКМ — контекст ИИ, ПКМ — меню, перетаскивание — переместить"
-                  className={`tree-node ${isSelectedEl ? 'active' : ''}`}
-                >
-                  <span
-                    className="mono truncate flex items-center gap-1.5 min-w-0"
-                    style={{
-                      color: isSelectedEl ? 'var(--ctx-pos-text)' : undefined,
-                    }}
-                  >
-                    <TypeIcon size={14} className="shrink-0" />
-                    <span className="truncate">{stripElementPrefix(el.id)}</span>
-                    {isElStarred && (
-                      <span title="Отмечено как важное" className="inline-flex items-center">
-                        <Star
-                          size={10}
-                          style={{
-                            color: 'var(--ctx-neg-text)',
-                            fill: 'var(--ctx-neg-text)',
-                          }}
-                          className="shrink-0"
-                        />
-                      </span>
-                    )}
-                  </span>
-                  {el.mvp && (
-                    <span
-                      className="pill"
-                      style={{
-                        color: 'var(--ctx-pos-text)',
-                        borderColor: 'var(--ctx-pos-border)',
-                      }}
-                    >
-                      MVP
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </>
-        )}
-      </div>
+        onFileClick={() => {
+          setActiveFile(fileName);
+          if (fileElements[0]) {
+            setSelectedId(fileElements[0].id);
+            setAiContextIds([fileElements[0].id]);
+          }
+        }}
+        onToggleCollapse={() => setCollapsedFiles((previous) => ({ ...previous, [fileName]: !previous[fileName] }))}
+        onElementDragStart={(element, event) => {
+          const currentMulti = aiContextIdsRef.current;
+          const ids = currentMulti.includes(element.id) && currentMulti.length > 0
+            ? currentMulti
+            : event.ctrlKey || event.metaKey
+              ? Array.from(new Set([...currentMulti, element.id]))
+              : [element.id];
+          if (!currentMulti.includes(element.id)) {
+            selectedIdRef.current = element.id;
+            setSelectedId(element.id);
+            aiContextIdsRef.current = ids;
+            setAiContextIds(ids);
+          }
+          kbDraggedIdsRef.current = ids;
+          setKbDraggedIds(ids);
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', ids.length === 1 ? ids[0] : JSON.stringify(ids));
+        }}
+        onElementDragEnd={() => {
+          kbDraggedIdsRef.current = [];
+          setKbDraggedIds([]);
+          setDragOverFileName(null);
+        }}
+        onElementClick={(element, event) => {
+          handleSelectWithModifiers(element.id, event.ctrlKey || event.metaKey, fileName);
+          setLineRangeFilter(null);
+        }}
+      />
     );
   };
+  const isProjectEmpty = files.length === 0;
 
-  const isProjectEmpty = files.length === 0 || elements.length === 0;
+  const canvasContext = {
+    view: { activeTab, leftPanelOpen, locale },
+    graph: { elements, filteredElements, selectedElement, selectedId, aiContextIds, contradictions, canvasVisibleContradictions, edges, expandedNodeIds, ignoredContradictionIds, rejectedContradictionIds, canvasConflictFilter, showCanvasConflictOverlay, alignmentGuides, visibleRelations },
+    interaction: { canvasZoom, canvasPan, isPanningCanvas, panStart, draggingNodeId, dragOffset, connectingFromId, mouseCanvasPos, radialMenu },
+    refs: { aiContextIdsRef, canvasAreaRef, canvasMouseDownInfoRef, canvasNodeDownClientRef, dragStartSnapshotRef, draggingNodeIdRef, elementsRef, radialMenuRef, selectedIdRef },
+    actions: { setLeftPanelOpen, setActiveTab, setActiveFile, setElements, setSelectedId, setAiContextIds, setIgnoredContradictionIds, setRejectedContradictionIds, setShowCanvasConflictOverlay, setCanvasConflictFilter, setAlignmentGuides, setVisibleRelations, setCanvasZoom, setCanvasPan, setIsPanningCanvas, setPanStart, setDraggingNodeId, setDragOffset, setConnectingFromId, setMouseCanvasPos, setRadialMenu, setExpandedNodeIds, beginHistoryTransaction: workspace.beginHistoryTransaction, endHistoryTransaction: workspace.endHistoryTransaction, commitDragSnapshotIfMoved, getRadialOptions, executeRadialAiAction, handleConnectOnCanvas, openConflictPopupFor, showNotice },
+  };
 
-  return (
+  const contextFileTarget = kbContextMenu?.target;
+  const contextElementLibrary = contextFileTarget?.type === 'element'
+    ? {
+      elementId: contextFileTarget.elementId,
+      exists: elements.some((element) => element.id === contextFileTarget.elementId),
+      saved: unitLibrary.some((item) => item.element.id === contextFileTarget.elementId),
+    }
+    : null;
+  const contextFileLibrary = contextFileTarget?.type === 'file'
+    ? (() => {
+      const fileElements = elements.filter((element) => element.fileName === contextFileTarget.fileName);
+      const fileElementIds = new Set(fileElements.map((element) => element.id));
+      const savedIds = new Set(unitLibrary.filter((item) => fileElementIds.has(item.element.id)).map((item) => item.element.id));
+      return {
+        fileName: contextFileTarget.fileName,
+        elementCount: fileElements.length,
+        missingCount: fileElements.filter((element) => !savedIds.has(element.id)).length,
+      };
+    })()
+    : null;
+
+return (
     <div className="flex flex-col h-screen w-screen overflow-hidden">
-      {/* =================================================================
-          HEADER (Variation 5 System Dark style)
-         ================================================================= */}
-      <header className="sys-header">
-        <div className="flex items-center gap-8">
-          <div className="brand" onClick={() => setActiveTab('kb')}>
-            PLANAGER
+      {(!workspace.workspaceReady || workspace.operationBusy) && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-[var(--bg)]/95 p-6">
+          <div className="w-full max-w-lg rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6 space-y-4 shadow-2xl">
+            <div className="text-lg font-bold">{workspace.operationBusy ? tx('Обновление рабочего пространства…', 'Updating workspace…') : workspace.loading ? tx('Открываем локальный проект…', 'Opening local project…') : tx('Проект не загружен', 'Project is not loaded')}</div>
+            {workspace.error && <p role="alert" className="text-sm text-[var(--ctx-neg-text)]">{localizePgrParseError(workspace.error, locale)}</p>}
+            {!workspace.workspaceReady && <p className="text-xs text-[var(--ink-muted)]">{tx('Проект нельзя редактировать, пока локальные данные не загружены. Повторите открытие папки или перезапустите приложение после устранения ошибки.', 'The project cannot be edited until its local data has loaded. Reopen the folder or restart the app after resolving the error.')}</p>}
+            {!workspace.operationBusy && <button type="button" className="btn pos" disabled={workspace.preview || workspace.loading} onClick={() => workspace.choose().catch((cause: unknown) => workspace.setError(cause instanceof Error ? cause.message : String(cause)))}>{tx('Открыть папку проекта', 'Open project folder')}</button>}
+            {workspace.preview && <p className="text-[10px] text-[var(--ink-muted)]">{tx('Browser preview использует отдельное локальное хранилище.', 'Browser preview uses separate local storage.')}</p>}
           </div>
-
-          <nav className="nav-links">
-            <button
-              type="button"
-              onClick={() => setActiveTab('kb')}
-              className={`nav-link ${activeTab === 'kb' ? 'active' : ''}`}
-            >
-              {t.tabKb}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('canvas')}
-              className={`nav-link ${activeTab === 'canvas' ? 'active' : ''}`}
-            >
-              {t.tabCanvas}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('library')}
-              className={`nav-link ${activeTab === 'library' ? 'active' : ''}`}
-            >
-              {t.tabLibrary}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('settings')}
-              className={`nav-link ${activeTab === 'settings' ? 'active' : ''}`}
-            >
-              {t.tabSettings}
-            </button>
-          </nav>
         </div>
+      )}
+      <AppHeader
+        activeTab={activeTab}
+        locale={locale}
+        labels={t}
+        preview={workspace.preview}
+        saving={workspace.saving}
+        onTabChange={setActiveTab}
+        onCreateElement={openNewElementModal}
+        onOpenAssistant={() => setAiActiveModal('hub')}
+        onSaveCurrentToLibrary={() => handleSaveCurrentToLibrary()}
+      />
 
-        <div className="flex items-center gap-3">
-          {activeTab === 'kb' && (
-            <>
-              <button
-                type="button"
-                onClick={() => setNewElementModalOpen(true)}
-                className="btn primary flex items-center justify-center text-sm font-bold"
-                style={{ width: '28px', height: '28px', padding: 0 }}
-                title="Создать элемент"
-              >
-                +
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAiActiveModal('hub')}
-                className="btn btn-ai-shimmer flex items-center justify-center"
-                style={{ width: '28px', height: '28px', padding: 0 }}
-                title={t.aiBtn}
-              >
-                <Sparkles size={14} />
-              </button>
-            </>
-          )}
-
-          {activeTab === 'canvas' && (
-            <>
-              <button
-                type="button"
-                onClick={() => setNewElementModalOpen(true)}
-                className="btn primary flex items-center justify-center text-sm font-bold"
-                style={{ width: '28px', height: '28px', padding: 0 }}
-                title="Создать элемент"
-              >
-                +
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAiActiveModal('hub')}
-                className="btn btn-ai-shimmer flex items-center justify-center"
-                style={{ width: '28px', height: '28px', padding: 0 }}
-                title={t.aiBtn}
-              >
-                <Sparkles size={14} />
-              </button>
-            </>
-          )}
-
-          {activeTab === 'library' && (
-            <>
-              <button
-                type="button"
-                onClick={() => handleSaveCurrentToLibrary()}
-                className="btn primary"
-                style={{ padding: '5px 12px', height: '28px' }}
-              >
-                Сохранить текущий в библиотеку
-              </button>
-            </>
-          )}
+          {workspace.error && (
+            <div role="alert" className="px-4 py-2 text-xs border-b border-[var(--ctx-neg-border)] bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)]">
+              {tx('Ошибка проекта', 'Project error')}: {localizePgrParseError(workspace.error, locale)}
         </div>
-      </header>
+      )}
 
       {/* =================================================================
           TAB 1: БАЗА ЗНАНИЙ (Variation 5 3-Column Workspace)
@@ -3047,7 +2561,7 @@ export function App() {
             className={`btn p-1.5 panel-expand-btn left ${
               leftPanelOpen ? 'is-hidden' : ''
             }`}
-            title="Развернуть левую панель"
+            title={tx('Развернуть левую панель', 'Expand left panel')}
           >
             <PanelLeftOpen size={15} />
           </button>
@@ -3058,7 +2572,7 @@ export function App() {
             className={`btn p-1.5 panel-expand-btn right ${
               rightPanelOpen ? 'is-hidden' : ''
             }`}
-            title="Развернуть правую панель"
+            title={tx('Развернуть правую панель', 'Expand right panel')}
           >
             <PanelRightOpen size={15} />
           </button>
@@ -3070,6 +2584,20 @@ export function App() {
             }`}
           >
             <div className="files-column-inner">
+              {!workspace.root && files.length === 0 && elements.length === 0 && (
+                <div className="p-3 border-b border-[var(--border)] shrink-0">
+                  <button
+                    type="button"
+                    className="btn flex w-full items-center justify-start gap-2"
+                    disabled={workspace.preview || workspace.operationBusy}
+                    title={workspace.preview ? tx('Выбор папки доступен в приложении Tauri', 'Folder selection is available in the Tauri app') : tx('Открыть локальный проект', 'Open local project')}
+                    onClick={() => workspace.choose().catch((cause: unknown) => workspace.setError(cause instanceof Error ? cause.message : String(cause)))}
+                  >
+                    <Folder size={14} />
+                    {tx('Открыть проект', 'Open project')}
+                  </button>
+                </div>
+              )}
               <div
                 className="p-3 border-b border-[var(--border)] space-y-2 shrink-0 relative"
                 ref={filterPopoverRef}
@@ -3077,7 +2605,7 @@ export function App() {
                 <div className="flex items-center gap-1.5">
                   <input
                     type="text"
-                    placeholder="Поиск (id, имя)..."
+                    placeholder={tx('Поиск (id, имя)...', 'Search (id, name)...')}
                     value={kbSearch}
                     onChange={(e) => setKbSearch(e.target.value)}
                     className="sys-input flex-1 min-w-0 text-xs"
@@ -3090,7 +2618,7 @@ export function App() {
                         ? 'border-[var(--accent)] text-[var(--accent)] font-bold'
                         : ''
                     }`}
-                    title="Фильтры по типу и MVP"
+                    title={tx('Фильтры по типу и MVP', 'Filter by type and MVP')}
                   >
                     <Funnel size={14} />
                     {(kbTypeFilter !== 'all' || kbMvpFilter !== 'all') && (
@@ -3105,7 +2633,7 @@ export function App() {
                     type="button"
                     onClick={() => setLeftPanelOpen(false)}
                     className="btn p-1.5 shrink-0"
-                    title="Свернуть левую панель"
+                    title={tx('Свернуть левую панель', 'Collapse left panel')}
                   >
                     <PanelLeftClose size={14} />
                   </button>
@@ -3119,7 +2647,7 @@ export function App() {
                           size={13}
                           style={{ color: 'var(--ctx-pos-border)' }}
                         />
-                        <span>Фильтры проводника</span>
+                        <span>{tx('Фильтры проводника', 'Explorer filters')}</span>
                       </div>
                       <div className="flex items-center gap-1">
                         {(kbTypeFilter !== 'all' ||
@@ -3133,7 +2661,7 @@ export function App() {
                             }}
                             className="text-[10px] text-[var(--muted)] hover:text-[var(--ink)] px-1.5 py-0.5 rounded hover:bg-[var(--surface-hover)] cursor-pointer"
                           >
-                            Сброс
+                            {tx('Сброс', 'Reset')}
                           </button>
                         )}
                         <button
@@ -3148,7 +2676,7 @@ export function App() {
 
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-[var(--muted)] block">
-                        Тип элемента
+                        {tx('Тип элемента', 'Element type')}
                       </label>
                       <select
                         value={kbTypeFilter}
@@ -3160,19 +2688,19 @@ export function App() {
                         }}
                         className="sys-input mono text-[11px] w-full min-w-0 px-2 py-1.5 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
                       >
-                        <option value="all">Все типы</option>
-                        <option value="system">Система (sys_)</option>
-                        <option value="class">Класс (cls_)</option>
-                        <option value="process">Процесс (proc_)</option>
-                        <option value="component">Компонент (cmp_)</option>
-                        <option value="object">Объект (obj_)</option>
-                        <option value="idea">Идея (idea_)</option>
+                        <option value="all">{tx('Все типы', 'All types')}</option>
+                        <option value="system">{tx('Система (sys_)', 'System (sys_)')}</option>
+                        <option value="class">{tx('Класс (cls_)', 'Class (cls_)')}</option>
+                        <option value="process">{tx('Процесс (proc_)', 'Process (proc_)')}</option>
+                        <option value="component">{tx('Компонент (cmp_)', 'Component (cmp_)')}</option>
+                        <option value="object">{tx('Объект (obj_)', 'Object (obj_)')}</option>
+                        <option value="idea">{tx('Идея (idea_)', 'Idea (idea_)')}</option>
                       </select>
                     </div>
 
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-[var(--muted)] block">
-                        Статус MVP
+                        {tx('Статус MVP', 'MVP status')}
                       </label>
                       <select
                         value={kbMvpFilter}
@@ -3184,9 +2712,9 @@ export function App() {
                         }}
                         className="sys-input mono text-[11px] w-full min-w-0 px-2 py-1.5 cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
                       >
-                        <option value="all">MVP: все</option>
-                        <option value="mvp">Только MVP</option>
-                        <option value="later">Потом</option>
+                        <option value="all">{tx('MVP: все', 'MVP: all')}</option>
+                        <option value="mvp">{tx('Только MVP', 'MVP only')}</option>
+                        <option value="later">{tx('Потом', 'Later')}</option>
                       </select>
                     </div>
                   </div>
@@ -3194,7 +2722,7 @@ export function App() {
 
                 {(kbTypeFilter !== 'all' || kbMvpFilter !== 'all') && (
                   <div className="flex items-center gap-1.5 text-[10px] text-[var(--muted)] flex-wrap pt-1 border-t border-[var(--border)] mt-1">
-                    <span className="text-[var(--muted)]">Фильтр:</span>
+                    <span className="text-[var(--muted)]">{tx('Фильтр:', 'Filter:')}</span>
                     {kbTypeFilter !== 'all' && (
                       <span
                         style={{
@@ -3206,24 +2734,24 @@ export function App() {
                       >
                         <span>
                           {kbTypeFilter === 'system'
-                            ? 'Система'
+                            ? tx('Система', 'System')
                             : kbTypeFilter === 'class'
-                            ? 'Класс'
+                            ? tx('Класс', 'Class')
                             : kbTypeFilter === 'process'
-                            ? 'Процесс'
+                            ? tx('Процесс', 'Process')
                             : kbTypeFilter === 'component'
-                            ? 'Компонент'
+                            ? tx('Компонент', 'Component')
                             : kbTypeFilter === 'object'
-                            ? 'Объект'
+                            ? tx('Объект', 'Object')
                             : kbTypeFilter === 'idea'
-                            ? 'Идея'
+                            ? tx('Идея', 'Idea')
                             : kbTypeFilter}
                         </span>
                         <button
                           type="button"
                           onClick={() => setKbTypeFilter('all')}
                           className="hover:opacity-75 cursor-pointer font-bold ml-0.5"
-                          title="Убрать фильтр по типу"
+                          title={tx('Убрать фильтр по типу', 'Remove type filter')}
                         >
                           ×
                         </button>
@@ -3239,13 +2767,13 @@ export function App() {
                         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] mono"
                       >
                         <span>
-                          {kbMvpFilter === 'mvp' ? 'Только MVP' : 'Потом'}
+                          {kbMvpFilter === 'mvp' ? tx('Только MVP', 'MVP only') : tx('Потом', 'Later')}
                         </span>
                         <button
                           type="button"
                           onClick={() => setKbMvpFilter('all')}
                           className="hover:opacity-75 cursor-pointer font-bold ml-0.5"
-                          title="Убрать фильтр MVP"
+                          title={tx('Убрать фильтр MVP', 'Remove MVP filter')}
                         >
                           ×
                         </button>
@@ -3264,7 +2792,7 @@ export function App() {
                     className="px-2 py-1 rounded border mono text-[10px] flex items-center justify-between gap-1"
                   >
                     <span className="truncate">
-                      Выбрано (ИИ): {aiContextIds.length} элем.
+                      {tx('Фокус ИИ', 'AI focus')}: {aiContextIds.length} {tx('элем.', 'elements')} · {tx('в запрос включены только выбранные элементы', 'only selected elements are sent')}
                     </span>
                     <button
                       type="button"
@@ -3273,7 +2801,7 @@ export function App() {
                       }
                       className="underline cursor-pointer shrink-0"
                     >
-                      Сброс
+                      {tx('Сброс', 'Reset')}
                     </button>
                   </div>
                 )}
@@ -3349,7 +2877,7 @@ export function App() {
                             {folderName}/
                           </span>
                           {isFolderStarred && (
-                            <span title="Отмечено как важное" className="inline-flex items-center ml-0.5">
+                            <span title={tx('Отмечено как важное', 'Marked as important')} className="inline-flex items-center ml-0.5">
                               <Star
                                 size={11}
                                 style={{
@@ -3362,7 +2890,7 @@ export function App() {
                           )}
                         </div>
                         <span className="pill text-[9px] py-0 px-1.5 mono">
-                          {folderFiles.length} ф. · {folderElems.length} эл.
+                              {folderFiles.length} {tx('files', 'files')} · {folderElems.length} {tx('elements', 'elements')}
                         </span>
                       </div>
 
@@ -3378,7 +2906,7 @@ export function App() {
                                 })
                               }
                             >
-                              Папка пуста (ПКМ — создать файл)
+                              {tx('Папка пуста (ПКМ — создать файл)', 'Folder is empty (right-click to create a file)')}
                             </div>
                           )}
                           {folderFiles.map((fileName) =>
@@ -3398,44 +2926,13 @@ export function App() {
                 {/* Empty Filler Area (supports Right-Click anywhere on blank space) */}
                 <div
                   className="flex-1 min-h-[80px] cursor-default kb-empty-area"
-                  title="ПКМ — контекстное меню проводника"
+                  title={tx('ПКМ — контекстное меню проводника', 'Right-click for explorer context menu')}
                   onContextMenu={(e) =>
                     handleOpenContextMenu(e, { type: 'empty' })
                   }
                 />
               </div>
 
-              {/* Empty Project Demo Switcher */}
-              <div className="p-3 border-t border-[var(--border)]">
-                {!isProjectEmpty ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setElements([]);
-                      setFiles([]);
-                      setSelectedId(null);
-                      showNotice('Открыт новый пустой проект без файлов .pgr');
-                    }}
-                    className="btn w-full"
-                  >
-                    Пустой проект (тест)
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFiles(INITIAL_FILES);
-                      setElements(INITIAL_ELEMENTS);
-                      setActiveFile('sys_inventory.pgr');
-                      setSelectedId('cls_item');
-                      showNotice('Демо-проект восстановлен');
-                    }}
-                    className="btn primary w-full"
-                  >
-                    Загрузить демо-проект
-                  </button>
-                )}
-              </div>
             </div>
           </div>
 
@@ -3533,6 +3030,13 @@ export function App() {
                         const p1 = mainGraphLayout.posMap[edge.source];
                         const p2 = mainGraphLayout.posMap[edge.target];
                         if (!p1 || !p2) return null;
+                        const line = offsetGraphLine(
+                          edge.source,
+                          edge.target,
+                          p1,
+                          p2,
+                          mainGraphEdgeOffsets[edgeIdx] ?? 0
+                        );
 
                         const focusId = hoveredMiniNodeId || selectedId;
                         const isConnectedToFocus =
@@ -3547,32 +3051,16 @@ export function App() {
                             ? '2 3'
                             : undefined;
 
-                        // Offset label when opposite/parallel edges exist between the same pair of nodes
-                        const pairEdges = mainGraphLayout.activeEdges.filter(
-                          (other) =>
-                            (other.source === edge.source &&
-                              other.target === edge.target) ||
-                            (other.source === edge.target &&
-                              other.target === edge.source)
-                        );
-                        const pairIdx = pairEdges.findIndex(
-                          (other) => other.id === edge.id
-                        );
-                        const labelShift =
-                          pairEdges.length > 1
-                            ? (pairIdx - (pairEdges.length - 1) / 2) * 14
-                            : 0;
-
-                        const midX = (p1.x + p2.x) / 2;
-                        const midY = (p1.y + p2.y) / 2 - 4 + labelShift;
+                        const midX = (line.x1 + line.x2) / 2;
+                        const midY = (line.y1 + line.y2) / 2 - 4;
 
                         return (
                           <g key={`${edge.id}_${edgeIdx}`}>
                             <line
-                              x1={p1.x}
-                              y1={p1.y}
-                              x2={p2.x}
-                              y2={p2.y}
+                              x1={line.x1}
+                              y1={line.y1}
+                              x2={line.x2}
+                              y2={line.y2}
                               stroke={
                                 !edge.valid
                                   ? 'var(--ctx-neg)'
@@ -3684,7 +3172,7 @@ export function App() {
                                 ? 15
                                 : 10,
                           }}
-                          title={`${el.id} — ${el.title} (двойной клик: открыть в редакторе)`}
+                          title={`${el.id} — ${el.title} (${tx('двойной клик: открыть в редакторе', 'double-click to open in editor')})`}
                           className="main-graph-node absolute w-9 h-9 cursor-pointer transition-opacity duration-150"
                         >
                           <div
@@ -3731,14 +3219,14 @@ export function App() {
                     onClick={() => setKbMainGraphOpen(false)}
                     style={{ backgroundColor: 'var(--bg)', height: '32px', width: '32px' }}
                     className="btn p-0 flex items-center justify-center"
-                    title="Вернуться к редактированию элемента"
+                    title={tx('Вернуться к редактированию элемента', 'Return to element editor')}
                   >
                     <Minimize2 size={18} />
                   </button>
                   <div
                     style={{ backgroundColor: 'var(--bg)', height: '32px' }}
                     className="pill flex items-center gap-2 px-2.5 py-0"
-                    title="Коэффициент отдаления между элементами графа"
+                      title={tx('Коэффициент отдаления между элементами графа', 'Graph spacing between elements')}
                   >
                     <input
                       type="range"
@@ -3755,7 +3243,7 @@ export function App() {
                       type="button"
                       onClick={() => setGraphSpread(1)}
                       className="flex items-center justify-center p-1 rounded border border-transparent hover:border-[var(--border)] hover:text-[var(--ink)] transition-colors cursor-pointer"
-                      title="Сбросить масштаб до 1"
+                    title={tx('Сбросить масштаб до 1', 'Reset zoom to 1')}
                     >
                       <RotateCcw size={14} />
                     </button>
@@ -3772,12 +3260,10 @@ export function App() {
               >
                 {isProjectEmpty ? (
                 <div className="p-10 border border-dashed border-[var(--border)] rounded-lg text-center space-y-4 my-8">
-                  <div className="label">EMPTY WORKSPACE</div>
-                  <h2 className="text-xl font-bold">
-                    В проекте пока нет файлов плана (.pgr)
-                  </h2>
+                  <div className="label">{tx('ПУСТОЕ РАБОЧЕЕ ПРОСТРАНСТВО', 'EMPTY WORKSPACE')}</div>
+                  <h2 className="text-xl font-bold">{tx('В проекте пока нет файлов плана (.pgr)', 'There are no plan files (.pgr) in the project yet')}</h2>
                   <p className="text-xs text-[var(--ink-muted)] max-w-md mx-auto leading-relaxed">
-                    Создайте первый файл разметки .pgr, вставьте готовые блоки из Библиотеки юнитов или загрузите демонстрационный проект.
+                    {tx('Создайте первый файл разметки .pgr или вставьте готовые блоки из Библиотеки юнитов.', 'Create your first .pgr file or insert ready-made blocks from the Unit Library.')}
                   </p>
                   <div className="flex items-center justify-center gap-3 pt-2">
                     <button
@@ -3786,30 +3272,18 @@ export function App() {
                         setFiles(['sys_core.pgr']);
                         setActiveFile('sys_core.pgr');
                         setNewElFile('sys_core.pgr');
-                        setNewElementModalOpen(true);
+                        openNewElementModal();
                       }}
                       className="btn pos"
                     >
-                      + Создать первый файл .pgr
+                      + {tx('Создать первый файл .pgr', 'Create first .pgr file')}
                     </button>
                     <button
                       type="button"
                       onClick={() => setActiveTab('library')}
                       className="btn"
                     >
-                      Библиотека юнитов
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFiles(INITIAL_FILES);
-                        setElements(INITIAL_ELEMENTS);
-                        setActiveFile('sys_inventory.pgr');
-                        setSelectedId('cls_item');
-                      }}
-                      className="btn primary"
-                    >
-                      Загрузить пример проекта
+                      {tx('Библиотека юнитов', 'Unit Library')}
                     </button>
                   </div>
                 </div>
@@ -3829,10 +3303,10 @@ export function App() {
                         type="button"
                         onClick={() => setKbMainGraphOpen(true)}
                         className="btn py-1 px-2.5"
-                        title="Открыть граф элементов в основной области"
+                        title={tx('Открыть граф элементов в основной области', 'Open the element graph in the main area')}
                       >
                         <Maximize2 size={12} />
-                        <span>Граф</span>
+                        <span>{tx('Граф', 'Graph')}</span>
                       </button>
                       <button
                         type="button"
@@ -3844,23 +3318,24 @@ export function App() {
                         className="btn py-1 px-2.5"
                       >
                         {kbEditorMode === 'structured'
-                          ? 'Текст .pgr'
-                          : 'Блочная сетка'}
+                          ? tx('Текст .pgr', '.pgr text')
+                          : tx('Блочная сетка', 'Structured editor')}
                       </button>
                     </div>
                   </div>
 
                   {/* Display Title in Syne 800 */}
-                  <input
-                    type="text"
+                  <AutoGrowTextarea
+                    aria-label={tx('Название элемента', 'Element title')}
                     value={selectedElement.title}
-                    onChange={(e) =>
+                    onChange={(title) =>
                       updateElement({
                         ...selectedElement,
-                        title: e.target.value,
+                        title,
                       })
                     }
-                    className="title-display"
+                    onKeyDown={(event) => { if (event.key === 'Enter') event.preventDefault(); }}
+                    className="title-display element-title-display"
                   />
                   <div
                     className="label"
@@ -3870,865 +3345,61 @@ export function App() {
                   </div>
 
                   {kbEditorMode === 'structured' ? (
-                    <div className="field-grid">
-                      {/* Row 1: Header */}
-                      <div
-                        className="field-row"
-                        onClick={() => setCursorLine(1)}
-                      >
-                        <div className="field-label">Header</div>
-                        <div className="field-value">
-                          <input
-                            type="text"
-                            value={`## ${TYPE_HEADERS_RU[selectedElement.type]}: ${selectedElement.title}`}
-                            onChange={(e) => {
-                              const cleaned = e.target.value.replace(
-                                /^##\s*[^:]+:\s*/,
-                                ''
-                              );
-                              updateElement({
-                                ...selectedElement,
-                                title: cleaned,
-                              });
-                            }}
-                          />
-                        </div>
-                      </div>
-
-                      {/* Row 2: Identity & Hierarchy */}
-                      <div
-                        className="field-row"
-                        onClick={() => setCursorLine(2)}
-                      >
-                        <div className="field-label">Identity</div>
-                        <div className="field-value">
-                          <div className="identity-grid">
-                            <span className="label">id:</span>
-                            <input
-                              type="text"
-                              value={selectedElement.id}
-                              onChange={(e) =>
-                                updateElement({
-                                  ...selectedElement,
-                                  id: e.target.value.trim(),
-                                })
-                              }
-                              className="identity-control"
-                              style={{ color: 'var(--accent)' }}
-                            />
-
-                            {selectedElement.type !== 'system' && (
-                              <>
-                                <span className="label">parent:</span>
-                                <select
-                                  value={selectedElement.parent || '-'}
-                                  onChange={(e) =>
-                                    updateElement({
-                                      ...selectedElement,
-                                      parent: e.target.value,
-                                    })
-                                  }
-                                  className="identity-control cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
-                                >
-                                  <option
-                                    value="-"
-                                    className="bg-[var(--surface)] text-[var(--ink)]"
-                                  >
-                                    - (без родителя)
-                                  </option>
-                                  {elements
-                                    .filter((x) => x.type === 'system')
-                                    .map((sys) => (
-                                      <option
-                                        key={sys.id}
-                                        value={sys.id}
-                                        className="bg-[var(--surface)] text-[var(--ink)]"
-                                      >
-                                        {sys.id}
-                                      </option>
-                                    ))}
-                                </select>
-                              </>
-                            )}
-
-                            {selectedElement.type === 'class' && (
-                              <>
-                                <span className="label">extends:</span>
-                                <select
-                                  value={selectedElement.extendsId || '-'}
-                                  onChange={(e) =>
-                                    updateElement({
-                                      ...selectedElement,
-                                      extendsId: e.target.value,
-                                    })
-                                  }
-                                  className="identity-control cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
-                                >
-                                  <option
-                                    value="-"
-                                    className="bg-[var(--surface)] text-[var(--ink)]"
-                                  >
-                                    -
-                                  </option>
-                                  {elements
-                                    .filter(
-                                      (x) =>
-                                        x.type === 'class' &&
-                                        x.id !== selectedElement.id
-                                    )
-                                    .map((cls) => (
-                                      <option
-                                        key={cls.id}
-                                        value={cls.id}
-                                        className="bg-[var(--surface)] text-[var(--ink)]"
-                                      >
-                                        {cls.id}
-                                      </option>
-                                    ))}
-                                </select>
-                              </>
-                            )}
-
-                            {selectedElement.type === 'object' && (
-                              <>
-                                <span className="label">instance_of:</span>
-                                <select
-                                  value={selectedElement.instanceOf || '-'}
-                                  onChange={(e) =>
-                                    updateElement({
-                                      ...selectedElement,
-                                      instanceOf: e.target.value,
-                                    })
-                                  }
-                                  className="identity-control cursor-pointer bg-[var(--surface)] text-[var(--ink)]"
-                                >
-                                  <option
-                                    value="-"
-                                    className="bg-[var(--surface)] text-[var(--ink)]"
-                                  >
-                                    - (только компоненты)
-                                  </option>
-                                  {elements
-                                    .filter((x) => x.type === 'class')
-                                    .map((cls) => (
-                                      <option
-                                        key={cls.id}
-                                        value={cls.id}
-                                        className="bg-[var(--surface)] text-[var(--ink)]"
-                                      >
-                                        {cls.id}
-                                      </option>
-                                    ))}
-                                </select>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Row 3: Description */}
-                      <div
-                        className="field-row"
-                        onClick={() => setCursorLine(4)}
-                      >
-                        <div className="field-label">Description</div>
-                        <div className="field-value">
-                          <textarea
-                            rows={2}
-                            value={selectedElement.description}
-                            onChange={(e) =>
-                              updateElement({
-                                ...selectedElement,
-                                description: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                      </div>
-
-                      {/* CLASS: Fields & Methods */}
-                      {selectedElement.type === 'class' && (
-                        <>
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(7)}
-                          >
-                            <div className="field-label">Fields</div>
-                            <div className="field-value space-y-2">
-                              {(selectedElement.fields || []).map((f, idx) => (
-                                <div
-                                  key={idx}
-                                  className="flex items-center justify-between text-xs mono py-1 border-b border-[var(--border)]"
-                                >
-                                  <span>
-                                    <strong style={{ color: 'var(--ink)' }}>
-                                      {f.name}
-                                    </strong>
-                                    : {f.dataType} — {f.description}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      updateElement({
-                                        ...selectedElement,
-                                        fields: (
-                                          selectedElement.fields || []
-                                        ).filter((_, i) => i !== idx),
-                                      })
-                                    }
-                                    className="text-[11px] hover:text-[var(--ctx-neg-text)] cursor-pointer"
-                                  >
-                                    удалить
-                                  </button>
-                                </div>
-                              ))}
-                              <div className="flex items-center gap-2 pt-1 w-full">
-                                <input
-                                  placeholder="имя_поля"
-                                  value={inlineFieldName}
-                                  onChange={(e) =>
-                                    setInlineFieldName(e.target.value)
-                                  }
-                                  className="sys-input mono min-w-0 shrink-0"
-                                  style={{ width: '108px' }}
-                                />
-                                <input
-                                  placeholder="тип (float)"
-                                  value={inlineFieldType}
-                                  onChange={(e) =>
-                                    setInlineFieldType(e.target.value)
-                                  }
-                                  className="sys-input mono min-w-0 shrink-0"
-                                  style={{ width: '92px' }}
-                                />
-                                <input
-                                  placeholder="описание"
-                                  value={inlineFieldDesc}
-                                  onChange={(e) =>
-                                    setInlineFieldDesc(e.target.value)
-                                  }
-                                  className="sys-input flex-1 min-w-0"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (!inlineFieldName.trim()) return;
-                                    updateElement({
-                                      ...selectedElement,
-                                      fields: [
-                                        ...(selectedElement.fields || []),
-                                        {
-                                          name: inlineFieldName.trim(),
-                                          dataType:
-                                            inlineFieldType.trim() || 'string',
-                                          description:
-                                            inlineFieldDesc.trim() || 'поле',
-                                        },
-                                      ],
-                                    });
-                                    setInlineFieldName('');
-                                    setInlineFieldDesc('');
-                                  }}
-                                  className="btn shrink-0"
-                                >
-                                  + Поле
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(11)}
-                          >
-                            <div className="field-label">Methods</div>
-                            <div className="field-value space-y-2">
-                              {(selectedElement.methods || []).map((m, idx) => (
-                                <div
-                                  key={idx}
-                                  className="flex items-center justify-between text-xs mono py-1 border-b border-[var(--border)]"
-                                >
-                                  <span>
-                                    <strong
-                                      style={{
-                                        color:
-                                          m.visibility === '-'
-                                            ? 'var(--ctx-neg-text)'
-                                            : 'var(--ctx-pos-text)',
-                                      }}
-                                    >
-                                      {m.visibility} {m.signature}
-                                    </strong>{' '}
-                                    — {m.description}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      updateElement({
-                                        ...selectedElement,
-                                        methods: (
-                                          selectedElement.methods || []
-                                        ).filter((_, i) => i !== idx),
-                                      })
-                                    }
-                                    className="text-[11px] hover:text-[var(--ctx-neg-text)] cursor-pointer"
-                                  >
-                                    удалить
-                                  </button>
-                                </div>
-                              ))}
-                              <div className="flex items-center gap-2 pt-1 w-full">
-                                <select
-                                  value={inlineMethodVis}
-                                  onChange={(e) =>
-                                    setInlineMethodVis(
-                                      e.target.value as '+' | '-'
-                                    )
-                                  }
-                                  className="sys-input mono min-w-0 shrink-0 cursor-pointer"
-                                  style={{ width: '92px' }}
-                                >
-                                  <option value="+">+ публ.</option>
-                                  <option value="-">- прив.</option>
-                                </select>
-                                <input
-                                  placeholder="use()"
-                                  value={inlineMethodSig}
-                                  onChange={(e) =>
-                                    setInlineMethodSig(e.target.value)
-                                  }
-                                  className="sys-input mono min-w-0 shrink-0"
-                                  style={{ width: '108px' }}
-                                />
-                                <input
-                                  placeholder="описание метода"
-                                  value={inlineMethodDesc}
-                                  onChange={(e) =>
-                                    setInlineMethodDesc(e.target.value)
-                                  }
-                                  className="sys-input flex-1 min-w-0"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (!inlineMethodSig.trim()) return;
-                                    updateElement({
-                                      ...selectedElement,
-                                      methods: [
-                                        ...(selectedElement.methods || []),
-                                        {
-                                          visibility: inlineMethodVis,
-                                          signature: inlineMethodSig.trim(),
-                                          description:
-                                            inlineMethodDesc.trim() || 'метод',
-                                        },
-                                      ],
-                                    });
-                                    setInlineMethodSig('');
-                                    setInlineMethodDesc('');
-                                  }}
-                                  className="btn shrink-0"
-                                >
-                                  + Метод
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </>
-                      )}
-
-                      {/* OBJECT: Inherited & Overridden Values */}
-                      {selectedElement.type === 'object' && (
-                        <div
-                          className="field-row"
-                          onClick={() => setCursorLine(8)}
-                        >
-                          <div className="field-label">Values</div>
-                          <div className="field-value space-y-2">
-                            {inheritedObjectFields.map((inh) => {
-                              const valObj = (
-                                selectedElement.values || []
-                              ).find((v) => v.fieldName === inh.fieldName);
-                              return (
-                                <div
-                                  key={inh.fieldName}
-                                  className="flex items-center gap-3 py-1 border-b border-[var(--border)]"
-                                >
-                                  <span className="mono w-48 truncate">
-                                    <strong style={{ color: 'var(--ink)' }}>
-                                      {inh.fieldName}
-                                    </strong>{' '}
-                                    ({inh.dataType} · {inh.sourceId})
-                                  </span>
-                                  <input
-                                    type="text"
-                                    placeholder="Укажите конкретное значение..."
-                                    value={valObj?.value || ''}
-                                    onChange={(e) => {
-                                      const nextVals = [
-                                        ...(selectedElement.values || []),
-                                      ];
-                                      const idx = nextVals.findIndex(
-                                        (x) => x.fieldName === inh.fieldName
-                                      );
-                                      if (!e.target.value.trim()) {
-                                        if (idx !== -1) nextVals.splice(idx, 1);
-                                      } else if (idx !== -1) {
-                                        nextVals[idx] = {
-                                          fieldName: inh.fieldName,
-                                          value: e.target.value,
-                                        };
-                                      } else {
-                                        nextVals.push({
-                                          fieldName: inh.fieldName,
-                                          value: e.target.value,
-                                        });
-                                      }
-                                      updateElement({
-                                        ...selectedElement,
-                                        values: nextVals,
-                                      });
-                                    }}
-                                    className="mono flex-1"
-                                    style={{ color: 'var(--accent)' }}
-                                  />
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* PROCESS: Steps */}
-                      {selectedElement.type === 'process' && (
-                        <div
-                          className="field-row"
-                          onClick={() => setCursorLine(8)}
-                        >
-                          <div className="field-label">Steps</div>
-                          <div className="field-value space-y-2">
-                            {(selectedElement.steps || []).map((st, idx) => (
-                              <div
-                                key={idx}
-                                className="flex items-center justify-between text-xs py-1 border-b border-[var(--border)]"
-                              >
-                                <span>
-                                  <span className="mono mr-2">{idx + 1}.</span>
-                                  {st}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    updateElement({
-                                      ...selectedElement,
-                                      steps: (
-                                        selectedElement.steps || []
-                                      ).filter((_, i) => i !== idx),
-                                    })
-                                  }
-                                  className="mono text-[11px] cursor-pointer"
-                                >
-                                  удалить
-                                </button>
-                              </div>
-                            ))}
-                            <div className="flex gap-2 pt-1">
-                              <input
-                                placeholder="Добавить шаг последовательности..."
-                                value={inlineStepText}
-                                onChange={(e) =>
-                                  setInlineStepText(e.target.value)
-                                }
-                                className="sys-input flex-1"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!inlineStepText.trim()) return;
-                                  updateElement({
-                                    ...selectedElement,
-                                    steps: [
-                                      ...(selectedElement.steps || []),
-                                      inlineStepText.trim(),
-                                    ],
-                                  });
-                                  setInlineStepText('');
-                                }}
-                                className="btn"
-                              >
-                                + Шаг
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* COMPONENT: Interface & Internal Logic */}
-                      {selectedElement.type === 'component' && (
-                        <>
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(8)}
-                          >
-                            <div className="field-label">Interface (+)</div>
-                            <div className="field-value space-y-2">
-                              {(selectedElement.interfaceItems || []).map(
-                                (it, idx) => (
-                                  <div
-                                    key={idx}
-                                    className="flex items-center justify-between mono text-xs py-1 border-b border-[var(--border)]"
-                                  >
-                                    <span>
-                                      <strong
-                                        style={{ color: 'var(--ctx-pos-text)' }}
-                                      >
-                                        +
-                                      </strong>{' '}
-                                      {it}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        updateElement({
-                                          ...selectedElement,
-                                          interfaceItems: (
-                                            selectedElement.interfaceItems || []
-                                          ).filter((_, i) => i !== idx),
-                                        })
-                                      }
-                                      className="text-[11px] hover:text-[var(--ctx-neg-text)] cursor-pointer"
-                                    >
-                                      удалить
-                                    </button>
-                                  </div>
-                                )
-                              )}
-                              <div className="flex gap-2 pt-1">
-                                <input
-                                  placeholder="param: int — описание"
-                                  value={inlineInterfaceText}
-                                  onChange={(e) =>
-                                    setInlineInterfaceText(e.target.value)
-                                  }
-                                  className="sys-input flex-1 mono"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (!inlineInterfaceText.trim()) return;
-                                    updateElement({
-                                      ...selectedElement,
-                                      interfaceItems: [
-                                        ...(selectedElement.interfaceItems ||
-                                          []),
-                                        inlineInterfaceText.trim(),
-                                      ],
-                                    });
-                                    setInlineInterfaceText('');
-                                  }}
-                                  className="btn"
-                                >
-                                  + Интерфейс
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(12)}
-                          >
-                            <div className="field-label">Internal Logic (-)</div>
-                            <div className="field-value space-y-2">
-                              {(selectedElement.internalLogic || []).map(
-                                (lg, idx) => (
-                                  <div
-                                    key={idx}
-                                    className="flex items-center justify-between text-xs py-1 border-b border-[var(--border)]"
-                                  >
-                                    <span>
-                                      <strong
-                                        style={{ color: 'var(--ctx-neg-text)' }}
-                                      >
-                                        -
-                                      </strong>{' '}
-                                      {lg}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        updateElement({
-                                          ...selectedElement,
-                                          internalLogic: (
-                                            selectedElement.internalLogic || []
-                                          ).filter((_, i) => i !== idx),
-                                        })
-                                      }
-                                      className="mono text-[11px] hover:text-[var(--ctx-neg-text)] cursor-pointer"
-                                    >
-                                      удалить
-                                    </button>
-                                  </div>
-                                )
-                              )}
-                              <div className="flex gap-2 pt-1">
-                                <input
-                                  placeholder="Правило внутренней логики..."
-                                  value={inlineLogicText}
-                                  onChange={(e) =>
-                                    setInlineLogicText(e.target.value)
-                                  }
-                                  className="sys-input flex-1"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (!inlineLogicText.trim()) return;
-                                    updateElement({
-                                      ...selectedElement,
-                                      internalLogic: [
-                                        ...(selectedElement.internalLogic ||
-                                          []),
-                                        inlineLogicText.trim(),
-                                      ],
-                                    });
-                                    setInlineLogicText('');
-                                  }}
-                                  className="btn"
-                                >
-                                  + Правило
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </>
-                      )}
-
-                      {/* IDEA: Linked To (alt_to & alt_reason) & Keywords/Notes */}
-                      {selectedElement.type === 'idea' && (
-                        <>
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(10)}
-                          >
-                            <div className="field-label">Linked To (Alt)</div>
-                            <div className="field-value flex items-center gap-4 flex-wrap">
-                              <select
-                                value={selectedElement.altTo || '-'}
-                                onChange={(e) =>
-                                  updateElement({
-                                    ...selectedElement,
-                                    altTo: e.target.value,
-                                  })
-                                }
-                                className="identity-control cursor-pointer"
-                                style={{
-                                  width: '200px',
-                                  color: 'var(--ctx-neg-text)',
-                                }}
-                              >
-                                <option value="-">
-                                  - (мысль на будущее)
-                                </option>
-                                {elements
-                                  .filter((x) => x.id !== selectedElement.id)
-                                  .map((oe) => (
-                                    <option key={oe.id} value={oe.id}>
-                                      {oe.id}
-                                    </option>
-                                  ))}
-                              </select>
-                              <input
-                                type="text"
-                                placeholder="Причина отказа (alt_reason)..."
-                                value={selectedElement.altReason || ''}
-                                onChange={(e) =>
-                                  updateElement({
-                                    ...selectedElement,
-                                    altReason: e.target.value,
-                                  })
-                                }
-                                className="flex-1 text-xs"
-                                style={{ color: 'var(--ink-muted)' }}
-                              />
-                            </div>
-                          </div>
-
-                          <div
-                            className="field-row"
-                            onClick={() => setCursorLine(14)}
-                          >
-                            <div className="field-label">Notes</div>
-                            <div className="field-value space-y-2">
-                              <div className="mono">
-                                {(selectedElement.notes || []).join(', ') ||
-                                  'отдельно стоящая идея (без привязки)'}
-                              </div>
-                              <div className="flex flex-wrap gap-2 pt-1">
-                                {elements
-                                  .filter((x) => x.id !== selectedElement.id)
-                                  .map((target) => {
-                                    const active = (
-                                      selectedElement.notes || []
-                                    ).includes(target.id);
-                                    return (
-                                      <button
-                                        key={target.id}
-                                        type="button"
-                                        onClick={() => {
-                                          const curr =
-                                            selectedElement.notes || [];
-                                          const next = active
-                                            ? curr.filter(
-                                                (id) => id !== target.id
-                                              )
-                                            : [...curr, target.id];
-                                          updateElement({
-                                            ...selectedElement,
-                                            notes: next,
-                                          });
-                                        }}
-                                        className="pill cursor-pointer"
-                                        style={{
-                                          borderColor: active
-                                            ? 'var(--accent)'
-                                            : undefined,
-                                          color: active
-                                            ? 'var(--accent)'
-                                            : undefined,
-                                        }}
-                                      >
-                                        {target.id}
-                                      </button>
-                                    );
-                                  })}
-                              </div>
-                            </div>
-                          </div>
-                        </>
-                      )}
-
-                      {/* Shared Components (has) */}
-                      {['class', 'process', 'object'].includes(
-                        selectedElement.type
-                      ) && (
-                        <div
-                          className="field-row"
-                          onClick={() => setCursorLine(16)}
-                        >
-                          <div className="field-label">Components (has)</div>
-                          <div className="field-value flex flex-wrap gap-2">
-                            {elements
-                              .filter((e) => e.type === 'component')
-                              .map((cmp) => {
-                                const active = (
-                                  selectedElement.components || []
-                                ).includes(cmp.id);
-                                return (
-                                  <button
-                                    key={cmp.id}
-                                    type="button"
-                                    onClick={() => {
-                                      const curr =
-                                        selectedElement.components || [];
-                                      const next = active
-                                        ? curr.filter((x) => x !== cmp.id)
-                                        : [...curr, cmp.id];
-                                      updateElement({
-                                        ...selectedElement,
-                                        components: next,
-                                      });
-                                    }}
-                                    className="pill cursor-pointer"
-                                    style={{
-                                      borderColor: active
-                                        ? 'var(--accent)'
-                                        : undefined,
-                                      color: active
-                                        ? 'var(--accent)'
-                                        : undefined,
-                                    }}
-                                  >
-                                    {active ? '✓ ' : '+ '}
-                                    {cmp.id}
-                                  </button>
-                                );
-                              })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Shared Uses */}
-                      {['class', 'process'].includes(selectedElement.type) && (
-                        <div
-                          className="field-row"
-                          onClick={() => setCursorLine(18)}
-                        >
-                          <div className="field-label">Uses</div>
-                          <div className="field-value flex flex-wrap gap-2">
-                            {elements
-                              .filter((e) => e.id !== selectedElement.id)
-                              .map((target) => {
-                                const active = (
-                                  selectedElement.uses || []
-                                ).includes(target.id);
-                                return (
-                                  <button
-                                    key={target.id}
-                                    type="button"
-                                    onClick={() => {
-                                      const curr = selectedElement.uses || [];
-                                      const next = active
-                                        ? curr.filter((x) => x !== target.id)
-                                        : [...curr, target.id];
-                                      updateElement({
-                                        ...selectedElement,
-                                        uses: next,
-                                      });
-                                    }}
-                                    className="pill cursor-pointer"
-                                    style={{
-                                      borderColor: active
-                                        ? 'var(--accent)'
-                                        : undefined,
-                                      color: active
-                                        ? 'var(--accent)'
-                                        : undefined,
-                                    }}
-                                  >
-                                    {active ? '→ ' : ''}
-                                    {target.id}
-                                  </button>
-                                );
-                              })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <StructuredElementFields
+                      element={selectedElement}
+                      elements={elements}
+                      inheritedObjectFields={inheritedObjectFields}
+                      typeHeader={TYPE_HEADERS_RU[selectedElement.type]}
+                      onChange={updateElement}
+                      onRenameId={applyElementIdRename}
+                      onCursorLine={setCursorLine}
+                      tx={tx}
+                    />
                   ) : (
                     /* Raw .pgr line-range mode */
                     <div className="field-grid">
                       <div className="field-row">
                         <div className="field-label">
-                          .pgr Range
-                          {lineRangeFilter && (
-                            <button
-                              type="button"
-                              onClick={() => setLineRangeFilter(null)}
-                              className="block mt-2 underline cursor-pointer"
-                            >
-                              Показать все
-                            </button>
-                          )}
+                          {tx('.pgr Range', '.pgr range')}
+                          <span className="ml-2 text-[var(--ink-muted)]">{tx(`(${rawPgrLines.length} строк)`, `(${rawPgrLines.length} lines)`)}</span>
                         </div>
                         <div className="field-value space-y-3">
+                          <div className="flex flex-wrap items-end gap-2 rounded border border-[var(--border)] bg-[var(--bg)] p-2.5">
+                            <label htmlFor="pgr-range-start" className="space-y-1 text-[11px] text-[var(--ink-muted)]">
+                              <span className="block">{tx('С строки', 'From line')}</span>
+                              <input id="pgr-range-start" type="number" inputMode="numeric" min={1} max={rawPgrLines.length} value={rangeStartInput} onChange={(event) => setRangeStartInput(event.target.value)} className="sys-input w-24" />
+                            </label>
+                            <label htmlFor="pgr-range-end" className="space-y-1 text-[11px] text-[var(--ink-muted)]">
+                              <span className="block">{tx('По строку', 'To line')}</span>
+                              <input id="pgr-range-end" type="number" inputMode="numeric" min={1} max={rawPgrLines.length} value={rangeEndInput} onChange={(event) => setRangeEndInput(event.target.value)} className="sys-input w-24" />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={!requestedLineRange}
+                              onClick={() => requestedLineRange && setLineRangeFilter({ fileName: selectedElement.fileName, ...requestedLineRange })}
+                              className="btn pos"
+                            >
+                              {tx('Показать диапазон', 'Show range')}
+                            </button>
+                            {activeLineRangeFilter ? (
+                              <button type="button" onClick={() => setLineRangeFilter(null)} className="btn">
+                                {tx('Показать все', 'Show all')}
+                              </button>
+                            ) : null}
+                          </div>
+                          <p role="status" className="text-[11px] text-[var(--ink-muted)]">
+                            {activeLineRangeFilter
+                              ? tx(`Показаны строки ${activeLineRangeFilter.start}–${activeLineRangeFilter.end}`, `Showing lines ${activeLineRangeFilter.start}–${activeLineRangeFilter.end}`)
+                              : tx('Показан весь файл', 'Showing the full file')}
+                            {!requestedLineRange ? tx(' · Проверьте границы диапазона.', ' · Check the range bounds.') : ''}
+                          </p>
                           <div className="p-3 border border-[var(--border)] rounded bg-[var(--bg)] max-h-64 overflow-y-auto mono">
-                            {rawPgrDraft.split('\n').map((line, idx) => {
+                            {rawPgrLines.map((line, idx) => {
                               const num = idx + 1;
                               if (
-                                lineRangeFilter &&
-                                (num < lineRangeFilter.start ||
-                                  num > lineRangeFilter.end)
+                                activeLineRangeFilter &&
+                                (num < activeLineRangeFilter.start ||
+                                  num > activeLineRangeFilter.end)
                               ) {
                                 return null;
                               }
@@ -4760,35 +3431,32 @@ export function App() {
                             })}
                           </div>
 
-                          <textarea
-                            rows={7}
-                            value={rawPgrDraft}
-                            onChange={(e) => setRawPgrDraft(e.target.value)}
-                            className="sys-input w-full mono"
-                          />
+                          <div data-project-editor="true">
+                            <Suspense fallback={<div className="text-xs text-[var(--ink-muted)]" aria-busy="true">{tx('Загрузка редактора…', 'Loading editor…')}</div>}>
+                              <PgrSourceEditor value={rawPgrDraft} onChange={(value) => updateRawPgrDraft(selectedElement.fileName, value)} fileName={selectedElement.fileName} existingElements={elements} locale={locale} className="w-full" />
+                            </Suspense>
+                          </div>
                           <button
                             type="button"
                             onClick={() => {
-                              const parsed = parsePgrFileContent(
-                                rawPgrDraft,
-                                selectedElement.fileName,
-                                elements
-                              );
-                              setElements((prev) => [
-                                ...prev.filter(
-                                  (x) =>
-                                    x.fileName !== selectedElement.fileName
-                                ),
-                                ...parsed,
-                              ]);
-                              setUncommittedChanges((c) => c + 1);
-                              showNotice(
-                                `Разметка ${selectedElement.fileName} синхронизирована`
-                              );
+                              const file = selectedElement.fileName;
+                              try {
+                                const parsed = parsePgrFileContent(rawPgrDraft, file, elements);
+                                setElements((prev) => [
+                                  ...prev.filter((x) => x.fileName !== file),
+                                  ...parsed,
+                                ]);
+                                workspace.acceptSource(file, rawPgrDraft);
+                            showNotice(`${tx('Разметка', 'Source')} ${file} ${tx('синхронизирована', 'synchronized')}`);
+                              } catch (cause) {
+                                const message = localizePgrParseError(cause instanceof Error ? cause.message : String(cause), locale);
+                                workspace.setError(`${file}: ${message}`);
+                                showNotice(`${tx('Ошибки в .pgr', '.pgr errors')}: ${message}`);
+                              }
                             }}
                             className="btn pos"
                           >
-                            Применить правки .pgr
+                            {tx('Применить правки .pgr', 'Apply .pgr edits')}
                           </button>
                         </div>
                       </div>
@@ -4797,10 +3465,36 @@ export function App() {
                 </>
               ) : (
                 <div className="p-10 border border-dashed border-[var(--border)] rounded-lg text-center space-y-2 my-8">
-                  <div className="label">NO SELECTION</div>
-                  <div className="text-sm text-[var(--ink-muted)]">
-                    Выберите элемент в списке слева для просмотра и редактирования
-                  </div>
+                  {kbEditorMode === 'raw_pgr' || Boolean(workspace.sourceErrors[activeFile]) ? (
+                    <div className="max-w-3xl mx-auto text-left space-y-3">
+                      <div className="label text-[var(--ctx-neg-text)]">{tx('ИСХОДНИК НУЖДАЕТСЯ В ИСПРАВЛЕНИИ', 'SOURCE NEEDS REPAIR')}</div>
+                      <p className="text-xs text-[var(--ctx-neg-text)]">{localizePgrParseError(workspace.sourceErrors[activeFile], locale)}</p>
+                      <div data-project-editor="true">
+                        <Suspense fallback={<div className="text-xs text-[var(--ink-muted)]" aria-busy="true">{tx('Загрузка редактора…', 'Loading editor…')}</div>}>
+                          <PgrSourceEditor value={rawPgrDraft} onChange={(value) => updateRawPgrDraft(activeFile, value)} fileName={activeFile} existingElements={elements} locale={locale} className="w-full" />
+                        </Suspense>
+                      </div>
+                      <button type="button" className="btn pos" onClick={() => {
+                        try {
+                          const parsed = parsePgrFileContent(rawPgrDraft, activeFile, elements);
+                          setElements((current) => [...current.filter((element) => element.fileName !== activeFile), ...parsed]);
+                          workspace.acceptSource(activeFile, rawPgrDraft);
+                          setSelectedId(parsed[0]?.id || null);
+                                showNotice(`${tx('Разметка', 'Source')} ${activeFile} ${tx('синхронизирована', 'synchronized')}`);
+                        } catch (cause) {
+                          const message = localizePgrParseError(cause instanceof Error ? cause.message : String(cause), locale);
+                          workspace.stageSource(activeFile, rawPgrDraft, message);
+                        }
+                      }}>{tx('Проверить и применить исправленный PGR', 'Validate and apply repaired PGR')}</button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="label">{tx('НЕТ ВЫБРАННОГО ЭЛЕМЕНТА', 'NO SELECTION')}</div>
+                      <div className="text-sm text-[var(--ink-muted)]">
+                      {tx('Выберите элемент в списке слева для просмотра и редактирования', 'Select an element from the list on the left to view and edit it')}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
               </div>
@@ -4815,162 +3509,28 @@ export function App() {
           >
             <div className="props-column-inner">
               {selectedElement && (
-                <div className="sidebar-section">
-                  <div className="section-title">
-                    <span>Attributes</span>
-                    <button
-                      type="button"
-                      onClick={() => setRightPanelOpen(false)}
-                      className="btn p-1.5"
-                      title="Свернуть правую панель"
-                    >
-                      <PanelRightClose size={15} />
-                    </button>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Type</span>
-                    <select
-                      value={selectedElement.type}
-                      onChange={(e) =>
-                        updateElement({
-                          ...selectedElement,
-                          type: e.target.value as ElementType,
-                        })
-                      }
-                      className="mono bg-transparent border-b border-[var(--border)] cursor-pointer"
-                    >
-                      <option value="system">Система</option>
-                      <option value="class">Класс</option>
-                      <option value="process">Процесс-функция</option>
-                      <option value="component">Компонент</option>
-                      <option value="object">Объект</option>
-                      <option value="idea">Идея-образ</option>
-                    </select>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Parent</span>
-                    <span className="mono">
-                      {selectedElement.parent && selectedElement.parent !== '-'
-                        ? selectedElement.parent
-                        : 'None (-)'}
-                    </span>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Status</span>
-                    <span
-                      className="pill"
-                      style={{
-                        color: 'var(--ctx-pos-text)',
-                        borderColor: 'var(--ctx-pos-border)',
-                      }}
-                    >
-                      {selectedElement.status}
-                    </span>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Tag</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateElement({
-                          ...selectedElement,
-                          mvp: !selectedElement.mvp,
-                        })
-                      }
-                      className="pill cursor-pointer"
-                      style={{
-                        color: selectedElement.mvp
-                          ? 'var(--ctx-pos-text)'
-                          : 'var(--ctx-neg-text)',
-                        borderColor: selectedElement.mvp
-                          ? 'var(--ctx-pos-border)'
-                          : 'var(--ctx-neg-border)',
-                      }}
-                    >
-                      {selectedElement.mvp ? 'MVP' : 'Backlog (Потом)'}
-                    </button>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Has</span>
-                    <span className="mono truncate max-w-[170px]">
-                      {(selectedElement.components || []).join(', ') || '-'}
-                    </span>
-                  </div>
-
-                  <div className="stat-line">
-                    <span className="stat-label">Used by</span>
-                    <span className="mono truncate max-w-[170px]">
-                      {usedByIds.join(', ') || '-'}
-                    </span>
-                  </div>
-
-                  <div className="btn-group">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const res = generateLocalTransformation(
-                          selectedElement,
-                          'system_pack'
-                        );
-                        setElements((prev) => [
-                          ...prev,
-                          ...res.createdElements.filter(
-                            (c) => !prev.some((p) => p.id === c.id)
-                          ),
-                        ]);
-                        showNotice(res.summary);
-                      }}
-                      className="btn flex-1"
-                    >
-                      Expand
-                    </button>
-
-                    {deleteConfirmId !== selectedElement.id ? (
-                      <button
-                        type="button"
-                        onClick={() => setDeleteConfirmId(selectedElement.id)}
-                        className="btn neg-outline flex-1"
-                      >
-                        Delete
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const delId = selectedElement.id;
-                            setElements((prev) =>
-                              prev.filter((x) => x.id !== delId)
-                            );
-                            setDeleteConfirmId(null);
-                            showNotice(`Элемент ${delId} удалён`);
-                          }}
-                          className="btn pos flex-1"
-                        >
-                          {t.confirmYes}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeleteConfirmId(null)}
-                          className="btn neg flex-1"
-                        >
-                          {t.confirmNo}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
+                <ElementAttributesPanel
+                  element={selectedElement}
+                  locale={locale}
+                  usedByIds={usedByIds}
+                  confirmingDelete={deleteConfirmId === selectedElement.id}
+                  onCollapse={() => setRightPanelOpen(false)}
+                  onChange={updateElement}
+                  onExpand={() => void runTransformation(selectedElement, 'system_pack')}
+                  onRequestDelete={() => setDeleteConfirmId(selectedElement.id)}
+                  onConfirmDelete={() => {
+                    const id = selectedElement.id;
+                    setElements((previous) => deleteElements(previous, [id]));
+                    setDeleteConfirmId(null);
+                    showNotice(`${tx('Элемент', 'Element')} ${id} ${tx('удалён', 'deleted')}`);
+                  }}
+                  onCancelDelete={() => setDeleteConfirmId(null)}
+                />
               )}
-
               {/* Obsidian-style Element Graph Section with Type Icons */}
               <div className="sidebar-section">
                 <div className="section-title" style={{ marginBottom: '10px' }}>
-                  <span>Graph View</span>
+                  <span>{tx('Вид графа', 'Graph View')}</span>
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
@@ -4988,9 +3548,9 @@ export function App() {
                             ? 'var(--accent)'
                             : undefined,
                       }}
-                      title="Переключить между всеми узлами и локальным окружением выбранного элемента"
+                      title={tx('Переключить между всеми узлами и локальным окружением выбранного элемента', 'Switch between all nodes and the selected element’s local context')}
                     >
-                      {miniGraphMode === 'local' ? 'Локальный' : 'Все'}
+                      {miniGraphMode === 'local' ? tx('Локальный', 'Local') : tx('Все', 'All')}
                     </button>
                     <button
                       type="button"
@@ -5005,9 +3565,9 @@ export function App() {
                         });
                       }}
                       className="pill cursor-pointer"
-                      title="Сбросить вид графа"
+                      title={tx('Сбросить вид графа', 'Reset graph view')}
                     >
-                      Сброс
+                      {tx('Сброс', 'Reset')}
                     </button>
                     <button
                       type="button"
@@ -5021,8 +3581,8 @@ export function App() {
                       }}
                       title={
                         kbMainGraphOpen
-                          ? 'Вернуть редактор в основную область'
-                          : 'Открыть граф в основной области'
+                          ? tx('Вернуть редактор в основную область', 'Return the editor to the main area')
+                          : tx('Открыть граф в основной области', 'Open the graph in the main area')
                       }
                     >
                       {kbMainGraphOpen ? (
@@ -5036,7 +3596,7 @@ export function App() {
                         type="button"
                         onClick={() => setRightPanelOpen(false)}
                         className="btn p-1.5"
-                        title="Свернуть правую панель"
+                        title={tx('Свернуть правую панель', 'Collapse right panel')}
                       >
                         <PanelRightClose size={15} />
                       </button>
@@ -5046,7 +3606,7 @@ export function App() {
 
                 <div className="flex items-center justify-between gap-2 mb-2.5">
                   <span className="mono text-[10px] text-[var(--ink-muted)]">
-                    Коэф. отдаления
+                    {tx('Коэф. отдаления', 'Zoom ratio')}
                   </span>
                   <div className="flex items-center gap-2">
                     <input
@@ -5128,10 +3688,17 @@ export function App() {
                     }}
                   >
                     <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
-                      {miniGraphLayout.activeEdges.map((edge) => {
+                      {miniGraphLayout.activeEdges.map((edge, edgeIdx) => {
                         const p1 = miniGraphLayout.posMap[edge.source];
                         const p2 = miniGraphLayout.posMap[edge.target];
                         if (!p1 || !p2) return null;
+                        const line = offsetGraphLine(
+                          edge.source,
+                          edge.target,
+                          p1,
+                          p2,
+                          miniGraphEdgeOffsets[edgeIdx] ?? 0
+                        );
 
                         const focusId = hoveredMiniNodeId || selectedId;
                         const isConnectedToFocus =
@@ -5149,10 +3716,10 @@ export function App() {
                         return (
                           <line
                             key={edge.id}
-                            x1={p1.x}
-                            y1={p1.y}
-                            x2={p2.x}
-                            y2={p2.y}
+                            x1={line.x1}
+                            y1={line.y1}
+                            x2={line.x2}
+                            y2={line.y2}
                             stroke={
                               !edge.valid
                                 ? 'var(--ctx-neg)'
@@ -5240,7 +3807,7 @@ export function App() {
                                 ? 15
                                 : 10,
                           }}
-                          title={`${el.id} — ${el.title} (двойной клик: открыть на Холсте)`}
+                          title={`${el.id} — ${el.title} (${tx('двойной клик: открыть на Холсте', 'double-click to open on Canvas')})`}
                           className="mini-graph-node absolute w-6 h-6 cursor-pointer transition-opacity duration-150"
                         >
                           <div
@@ -5278,117 +3845,18 @@ export function App() {
                 </div>
               </div>
 
-              {/* Conflicts & AI Suggestion Section */}
-              <div
-                className="sidebar-section"
-                style={{ background: 'rgba(239, 68, 68, 0.02)' }}
-              >
-                <div
-                  className="section-title"
-                  style={{ color: 'var(--ctx-neg-text)' }}
-                >
-                  <span>Conflicts & AI</span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAiActiveModal('hub')}
-                      className="mono underline cursor-pointer text-[10px]"
-                    >
-                      Все ({proposals.length + contradictions.length})
-                    </button>
-                  </div>
-                </div>
-
-                {!aiEnabled ? (
-                  <div className="mono text-xs">
-                    Ручной режим активен (ИИ отключён в Настройках).
-                  </div>
-                ) : (
-                  <>
-                    {contradictions.slice(0, 1).map((c) => (
-                      <div
-                        key={c.id}
-                        className="text-xs font-medium"
-                        style={{
-                          color: 'var(--ctx-neg-text)',
-                          marginBottom: '18px',
-                        }}
-                      >
-                        <div style={{ marginBottom: '8px' }}>⚠ {c.title}</div>
-                        {c.suggestedFix && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const { targetElementId, patch } =
-                                c.suggestedFix!;
-                              setElements((prev) =>
-                                prev.map((el) =>
-                                  el.id === targetElementId
-                                    ? { ...el, ...patch }
-                                    : el
-                                )
-                              );
-                              setContradictions((prev) =>
-                                prev.filter((x) => x.id !== c.id)
-                              );
-                              showNotice(
-                                `Противоречие в ${targetElementId} исправлено`
-                              );
-                            }}
-                            className="btn py-1 px-2.5 text-[10px]"
-                          >
-                            Исправить конфликт
-                          </button>
-                        )}
-                      </div>
-                    ))}
-
-                    {proposals.slice(0, 1).map((prop) => (
-                      <div
-                        key={prop.id}
-                        className="ai-suggestion"
-                        style={{ marginTop: '14px' }}
-                      >
-                        <div
-                          className="label"
-                          style={{
-                            marginBottom: '8px',
-                            color: 'var(--ctx-pos-text)',
-                          }}
-                        >
-                          AI Suggestion
-                        </div>
-                        <div
-                          style={{
-                            fontSize: '0.8rem',
-                            marginBottom: '14px',
-                            lineHeight: 1.5,
-                          }}
-                        >
-                          {prop.title}.{' '}
-                          <span className="mono">{prop.rationale}</span>
-                        </div>
-                        <div className="btn-group">
-                          <button
-                            type="button"
-                            onClick={() => handleApplyProposal(prop)}
-                            className="btn pos flex-1"
-                          >
-                            Apply
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setRejectProposalModal(prop)}
-                            className="btn neg flex-1"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
+              {aiEnabled && (
+                <KnowledgeAiSidebar
+                  locale={locale}
+                  enabled={aiEnabled}
+                  proposals={proposals}
+                  contradictions={contradictions}
+                  onOpenAssistant={() => setAiActiveModal('hub')}
+                  onFixContradiction={handleApplySuggestedFix}
+                  onApplyProposal={handleApplyProposal}
+                  onRejectProposal={setRejectProposalModal}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -5397,2243 +3865,70 @@ export function App() {
       {/* =================================================================
           TAB 2: ХОЛСТ (Pan by LMB on empty area, Zoom by wheel, Non-sticking drag)
          ================================================================= */}
-      {activeTab === 'canvas' && (
-        <div className="workspace-2col">
-          <button
-            type="button"
-            onClick={() => setLeftPanelOpen(true)}
-            className={`btn p-1.5 panel-expand-btn left ${
-              leftPanelOpen ? 'is-hidden' : ''
-            }`}
-            title="Развернуть левую панель"
-          >
-            <PanelLeftOpen size={15} />
-          </button>
-
-          {/* Left Controls Column */}
-          <div
-            className={`panel files-column ${
-              !leftPanelOpen ? 'collapsed' : ''
-            }`}
-          >
-            <div className="files-column-inner p-4 space-y-3">
-              <div className="section-title">
-                <span>Связи</span>
-                <button
-                  type="button"
-                  onClick={() => setLeftPanelOpen(false)}
-                  className="btn p-1.5"
-                  title="Свернуть левую панель"
-                >
-                  <PanelLeftClose size={15} />
-                </button>
-              </div>
-              <div className="space-y-1.5 mono text-xs pb-3 border-b border-[var(--border)]">
-                {(
-                  [
-                    'contains',
-                    'extends',
-                    'has',
-                    'instance_of',
-                    'uses',
-                    'notes',
-                  ] as RelationType[]
-                ).map((rel) => {
-                  const isChecked = visibleRelations[rel];
-                  return (
-                    <label
-                      key={rel}
-                      style={{
-                        borderColor: isChecked
-                          ? 'var(--ctx-pos-border)'
-                          : 'var(--border)',
-                        backgroundColor: isChecked
-                          ? 'var(--ctx-pos-soft)'
-                          : 'var(--surface)',
-                        color: isChecked
-                          ? 'var(--ctx-pos-text)'
-                          : 'var(--ink-muted)',
-                      }}
-                      className="flex items-center gap-2.5 px-2.5 py-1.5 rounded border transition-colors cursor-pointer select-none hover:border-[var(--ink-muted)]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() =>
-                          setVisibleRelations((prev) => ({
-                            ...prev,
-                            [rel]: !prev[rel],
-                          }))
-                        }
-                        className="sys-checkbox"
-                      />
-                      <span className="font-medium tracking-tight">{rel}</span>
-                    </label>
-                  );
-                })}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const allExpanded =
-                    filteredElements.length > 0 &&
-                    filteredElements.every((el) => expandedNodeIds[el.id]);
-                  if (allExpanded) {
-                    setExpandedNodeIds({});
-                  } else {
-                    const next: Record<string, boolean> = {};
-                    filteredElements.forEach((el) => {
-                      next[el.id] = true;
-                    });
-                    setExpandedNodeIds(next);
-                  }
-                }}
-                className="btn w-full"
-              >
-                {filteredElements.length > 0 &&
-                filteredElements.every((el) => expandedNodeIds[el.id])
-                  ? 'Свернуть все узлы'
-                  : 'Развернуть все узлы'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setCanvasZoom(100);
-                  setCanvasPan({ x: 20, y: 20 });
-                }}
-                className="btn w-full"
-              >
-                Сброс камеры (100%)
-              </button>
-
-              {/* AI Conflict Overlay Controls on Canvas */}
-              <div className="pt-3 border-t border-[var(--border)] space-y-2">
-                <div
-                  className="section-title"
-                  style={{
-                    color:
-                      contradictions.length > 0
-                        ? 'var(--ctx-neg-text)'
-                        : 'var(--ink-muted)',
-                    marginBottom: '8px',
-                  }}
-                >
-                  <span>Конфликты ИИ ({contradictions.length})</span>
-                </div>
-
-                <label
-                  style={{
-                    borderColor:
-                      showCanvasConflictOverlay && contradictions.length > 0
-                        ? 'var(--ctx-neg-border)'
-                        : 'var(--border)',
-                    backgroundColor:
-                      showCanvasConflictOverlay && contradictions.length > 0
-                        ? 'var(--ctx-neg-soft)'
-                        : 'var(--surface)',
-                    color:
-                      showCanvasConflictOverlay && contradictions.length > 0
-                        ? 'var(--ctx-neg-text)'
-                        : 'var(--ink-muted)',
-                  }}
-                  className="flex items-center gap-2.5 px-2.5 py-1.5 rounded border transition-colors cursor-pointer select-none mono text-xs"
-                >
-                  <input
-                    type="checkbox"
-                    checked={showCanvasConflictOverlay}
-                    onChange={(e) =>
-                      setShowCanvasConflictOverlay(e.target.checked)
-                    }
-                    style={
-                      showCanvasConflictOverlay
-                        ? {
-                            backgroundColor: 'var(--ctx-neg)',
-                            borderColor: 'var(--ctx-neg-border)',
-                          }
-                        : undefined
-                    }
-                    className="sys-checkbox"
-                  />
-                  <span className="font-medium tracking-tight">
-                    Оверлей конфликтов
-                  </span>
-                </label>
-
-                {showCanvasConflictOverlay && contradictions.length > 0 && (
-                  <div className="space-y-1.5 pt-1">
-                    <select
-                      value={canvasConflictFilter}
-                      onChange={(e) => setCanvasConflictFilter(e.target.value)}
-                      className="sys-input w-full mono text-[11px]"
-                    >
-                      <option value="all">
-                        Все конфликты ({contradictions.length})
-                      </option>
-                      {contradictions.map((c, idx) => (
-                        <option key={c.id} value={c.id}>
-                          #{idx + 1}: {c.title.slice(0, 26)}...
-                        </option>
-                      ))}
-                    </select>
-
-                    <div className="space-y-1">
-                      {contradictions.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          onClick={() => openConflictPopupFor([c], c.elementIds[0])}
-                          className="w-full text-left px-2.5 py-1.5 rounded border border-dashed text-[11px] mono transition-colors cursor-pointer hover:opacity-90"
-                          style={{
-                            borderColor: 'var(--ctx-neg-border)',
-                            backgroundColor: 'var(--ctx-neg-soft)',
-                            color: 'var(--ctx-neg-text)',
-                          }}
-                          title="Нажмите, чтобы открыть форму разрешения конфликта"
-                        >
-                          <div className="font-semibold truncate">
-                            ⚠ {c.title}
-                          </div>
-                          <div className="text-[10px] opacity-80 truncate">
-                            {c.elementIds.join(' · ')}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {(ignoredContradictionIds.length > 0 ||
-                  rejectedContradictionIds.length > 0) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIgnoredContradictionIds([]);
-                      setRejectedContradictionIds([]);
-                      setCanvasConflictFilter('all');
-                      showNotice('Скрытые и отклонённые конфликты восстановлены');
-                    }}
-                    className="btn w-full text-[10px]"
-                  >
-                    Вернуть скрытые (
-                    {ignoredContradictionIds.length +
-                      rejectedContradictionIds.length}
-                    )
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Interactive Canvas Surface */}
-          <div className="panel editor-column">
-            <div
-              ref={canvasAreaRef}
-              onContextMenu={(e) => {
-                e.preventDefault();
-              }}
-              onMouseDown={(e) => {
-                if ((e.target as HTMLElement).closest('.sys-node')) return;
-                if (e.button === 2) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const rect = canvasAreaRef.current?.getBoundingClientRect();
-                  if (!rect) return;
-                  const rawX = e.clientX - rect.left;
-                  const rawY = e.clientY - rect.top;
-                  const centerX = Math.max(
-                    185,
-                    Math.min(rect.width - 185, rawX)
-                  );
-                  const centerY = Math.max(
-                    160,
-                    Math.min(rect.height - 160, rawY)
-                  );
-                  setRadialMenu({
-                    mode: 'canvas',
-                    centerX,
-                    centerY,
-                    cursorX: rawX,
-                    cursorY: rawY,
-                    hoveredId: null,
-                  });
-                  return;
-                }
-                if (e.button !== 0) return;
-                e.preventDefault();
-                if (
-                  document.activeElement instanceof HTMLElement &&
-                  (document.activeElement.tagName === 'INPUT' ||
-                    document.activeElement.tagName === 'TEXTAREA' ||
-                    document.activeElement.tagName === 'SELECT')
-                ) {
-                  document.activeElement.blur();
-                }
-                setRadialMenu(null);
-                if (!e.ctrlKey && !e.metaKey) {
-                  selectedIdRef.current = null;
-                  setSelectedId(null);
-                  aiContextIdsRef.current = [];
-                  setAiContextIds([]);
-                }
-                setIsPanningCanvas(true);
-                setPanStart({
-                  x: e.clientX - canvasPan.x,
-                  y: e.clientY - canvasPan.y,
-                });
-              }}
-              onWheel={(e) => {
-                e.preventDefault();
-                const rect = canvasAreaRef.current?.getBoundingClientRect();
-                const delta = e.deltaY < 0 ? 10 : -10;
-                const nextZoom = Math.min(
-                  200,
-                  Math.max(40, canvasZoom + delta)
-                );
-                if (nextZoom === canvasZoom) return;
-
-                if (rect) {
-                  const cursorX = e.clientX - rect.left;
-                  const cursorY = e.clientY - rect.top;
-                  const oldScale = canvasZoom / 100;
-                  const newScale = nextZoom / 100;
-                  const worldX = (cursorX - canvasPan.x) / oldScale;
-                  const worldY = (cursorY - canvasPan.y) / oldScale;
-                  setCanvasPan({
-                    x: Math.round(cursorX - worldX * newScale),
-                    y: Math.round(cursorY - worldY * newScale),
-                  });
-                }
-                setCanvasZoom(nextZoom);
-              }}
-              onMouseMove={(e) => {
-                const rect = canvasAreaRef.current?.getBoundingClientRect();
-                if (!rect) return;
-
-                if (radialMenu) {
-                  const cursorX = e.clientX - rect.left;
-                  const cursorY = e.clientY - rect.top;
-                  const dx = cursorX - radialMenu.centerX;
-                  const dy = cursorY - radialMenu.centerY;
-                  const dist = Math.hypot(dx, dy);
-
-                  const activeOptions = getRadialOptions(
-                    radialMenu.mode,
-                    radialMenu.targetElementId
-                  );
-                  let nextHovered: typeof radialMenu.hoveredId = null;
-                  if (dist >= 18) {
-                    const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
-                    let bestDiff = Infinity;
-                    for (const opt of activeOptions) {
-                      let diff = Math.abs(deg - opt.angleDeg);
-                      if (diff > 180) diff = 360 - diff;
-                      if (diff < bestDiff) {
-                        bestDiff = diff;
-                        nextHovered = opt.id;
-                      }
-                    }
-                  }
-                  setRadialMenu((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          cursorX,
-                          cursorY,
-                          hoveredId: nextHovered,
-                        }
-                      : null
-                  );
-                  return;
-                }
-
-                if (isPanningCanvas) {
-                  setCanvasPan({
-                    x: e.clientX - panStart.x,
-                    y: e.clientY - panStart.y,
-                  });
-                  return;
-                }
-
-                const scale = canvasZoom / 100;
-                const x = (e.clientX - rect.left - canvasPan.x) / scale;
-                const y = (e.clientY - rect.top - canvasPan.y) / scale;
-                if (connectingFromId) {
-                  setMouseCanvasPos({ x, y });
-                }
-                const activeDragId = draggingNodeIdRef.current || draggingNodeId;
-                if (activeDragId) {
-                  const downInfo = canvasMouseDownInfoRef.current;
-                  if (downInfo && !downInfo.didMove) {
-                    const screenDist = Math.hypot(
-                      e.clientX - downInfo.clientX,
-                      e.clientY - downInfo.clientY
-                    );
-                    if (screenDist <= 4) {
-                      return;
-                    }
-                    downInfo.didMove = true;
-                  }
-
-                  const rawX = x - dragOffset.x;
-                  const rawY = y - dragOffset.y;
-                  let nx = Math.round(rawX / 10) * 10;
-                  let ny = Math.round(rawY / 10) * 10;
-
-                  const currentGroupIds = aiContextIdsRef.current;
-                  const moveGroup =
-                    currentGroupIds.length > 1 &&
-                    currentGroupIds.includes(activeDragId);
-                  const movingSet = new Set<string>(
-                    moveGroup ? currentGroupIds : [activeDragId]
-                  );
-
-                  const SNAP_THRESHOLD = 12;
-                  let snappedVerticalX: number | null = null;
-                  let snappedHorizontalY: number | null = null;
-                  let minDx = SNAP_THRESHOLD + 1;
-                  let minDy = SNAP_THRESHOLD + 1;
-
-                  for (const other of filteredElements) {
-                    if (movingSet.has(other.id)) continue;
-                    const dx = Math.abs(rawX - other.position.x);
-                    if (dx <= SNAP_THRESHOLD && dx < minDx) {
-                      minDx = dx;
-                      nx = other.position.x;
-                      snappedVerticalX = other.position.x;
-                    }
-                    const dy = Math.abs(rawY - other.position.y);
-                    if (dy <= SNAP_THRESHOLD && dy < minDy) {
-                      minDy = dy;
-                      ny = other.position.y;
-                      snappedHorizontalY = other.position.y;
-                    }
-                  }
-
-                  setAlignmentGuides({
-                    verticalX: snappedVerticalX,
-                    horizontalY: snappedHorizontalY,
-                  });
-
-                  const startSnap = dragStartSnapshotRef.current;
-                  const dragStartOrigin = startSnap?.[activeDragId];
-                  const deltaX = dragStartOrigin ? nx - dragStartOrigin.x : 0;
-                  const deltaY = dragStartOrigin ? ny - dragStartOrigin.y : 0;
-
-                  const nextElements = elementsRef.current.map((el) => {
-                    if (el.id === activeDragId) {
-                      return { ...el, position: { x: nx, y: ny } };
-                    }
-                    if (
-                      moveGroup &&
-                      movingSet.has(el.id) &&
-                      startSnap?.[el.id]
-                    ) {
-                      return {
-                        ...el,
-                        position: {
-                          x: Math.round((startSnap[el.id].x + deltaX) / 10) * 10,
-                          y: Math.round((startSnap[el.id].y + deltaY) / 10) * 10,
-                        },
-                      };
-                    }
-                    return el;
-                  });
-                  elementsRef.current = nextElements;
-                  setElements(nextElements);
-                }
-              }}
-              onMouseUp={() => {
-                commitDragSnapshotIfMoved();
-                setDraggingNodeId(null);
-                setConnectingFromId(null);
-                setIsPanningCanvas(false);
-                setAlignmentGuides({ verticalX: null, horizontalY: null });
-              }}
-              style={{
-                backgroundPosition: `${canvasPan.x}px ${canvasPan.y}px`,
-                cursor: isPanningCanvas ? 'grabbing' : 'grab',
-              }}
-              className="sys-canvas-area select-none"
-            >
-              <div
-                style={{
-                  transform: `translate(${canvasPan.x}px, ${canvasPan.y}px) scale(${canvasZoom / 100})`,
-                  transformOrigin: '0 0',
-                  width: '2400px',
-                  height: '1600px',
-                }}
-                className="relative"
-              >
-                <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
-                  <defs>
-                    <marker
-                      id="sys-arrow"
-                      viewBox="0 0 10 10"
-                      refX="8"
-                      refY="5"
-                      markerWidth="6"
-                      markerHeight="6"
-                      orient="auto-start-reverse"
-                    >
-                      <path d="M 0 1 L 9 5 L 0 9 z" fill="context-stroke" />
-                    </marker>
-                    <marker
-                      id="sys-arrow-conflict"
-                      viewBox="0 0 10 10"
-                      refX="8"
-                      refY="5"
-                      markerWidth="6.5"
-                      markerHeight="6.5"
-                      orient="auto-start-reverse"
-                    >
-                      <path
-                        d="M 0 1 L 9 5 L 0 9 z"
-                        fill="var(--ctx-neg-text)"
-                      />
-                    </marker>
-                  </defs>
-
-                  {edges
-                    .filter((edge) => visibleRelations[edge.relation])
-                    .map((edge) => {
-                      const src = elements.find((e) => e.id === edge.source);
-                      const tgt = elements.find((e) => e.id === edge.target);
-                      if (!src || !tgt) return null;
-
-                      const x1 = src.position.x + 85;
-                      const y1 = src.position.y + 30;
-                      const x2 = tgt.position.x + 85;
-                      const y2 = tgt.position.y + 30;
-
-                      const midX = (x1 + x2) / 2;
-                      const midY = (y1 + y2) / 2 - 6;
-
-                      const dash =
-                        edge.relation === 'extends'
-                          ? '6 4'
-                          : edge.relation === 'notes'
-                          ? '2 3'
-                          : undefined;
-
-                      // Check if this edge connects two nodes participating in an active AI contradiction
-                      const edgeContradictions =
-                        canvasVisibleContradictions.filter((c) => {
-                          const involved = new Set([
-                            ...c.elementIds,
-                            ...(c.suggestedFix?.targetElementId
-                              ? [c.suggestedFix.targetElementId]
-                              : []),
-                          ]);
-                          return (
-                            involved.has(edge.source) &&
-                            involved.has(edge.target)
-                          );
-                        });
-                      const isConflictEdge =
-                        !edge.valid || edgeContradictions.length > 0;
-
-                      const isSelectedEdge =
-                        selectedId === edge.source ||
-                        selectedId === edge.target ||
-                        aiContextIds.includes(edge.source) ||
-                        aiContextIds.includes(edge.target);
-
-                      const selectedMarkerColor = selectedElement
-                        ? selectedElement.customColor ||
-                          (selectedElement.type === 'idea' &&
-                          selectedElement.altTo &&
-                          selectedElement.altTo !== '-'
-                            ? 'var(--ctx-neg-text)'
-                            : selectedElement.mvp
-                            ? 'var(--ctx-pos-text)'
-                            : 'var(--ink)')
-                        : 'var(--ink-muted)';
-
-                      const labelWidth = Math.max(
-                        44,
-                        edge.relation.length * 6.4 + 10
-                      );
-
-                      return (
-                        <g
-                          key={edge.id}
-                          style={{
-                            pointerEvents:
-                              edgeContradictions.length > 0 ? 'auto' : 'none',
-                            cursor:
-                              edgeContradictions.length > 0
-                                ? 'pointer'
-                                : 'default',
-                          }}
-                          onMouseDown={(e) => {
-                            if (edgeContradictions.length > 0) {
-                              e.stopPropagation();
-                            }
-                          }}
-                          onClick={(e) => {
-                            if (edgeContradictions.length > 0) {
-                              e.stopPropagation();
-                              openConflictPopupFor(
-                                edgeContradictions,
-                                edge.source
-                              );
-                            }
-                          }}
-                        >
-                          {edgeContradictions.length > 0 && (
-                            <line
-                              x1={x1}
-                              y1={y1}
-                              x2={x2}
-                              y2={y2}
-                              stroke="transparent"
-                              strokeWidth={16}
-                            />
-                          )}
-                          <line
-                            x1={x1}
-                            y1={y1}
-                            x2={x2}
-                            y2={y2}
-                            stroke={
-                              isConflictEdge
-                                ? 'var(--ctx-neg-text)'
-                                : isSelectedEdge
-                                ? selectedMarkerColor
-                                : 'var(--ink-muted)'
-                            }
-                            strokeWidth={
-                              isConflictEdge ? 2.2 : isSelectedEdge ? 1.8 : 1.2
-                            }
-                            strokeDasharray={dash}
-                            markerEnd={
-                              isConflictEdge
-                                ? 'url(#sys-arrow-conflict)'
-                                : 'url(#sys-arrow)'
-                            }
-                          />
-                          {isConflictEdge && (
-                            <rect
-                              x={midX - labelWidth / 2}
-                              y={midY - 10}
-                              width={labelWidth}
-                              height={14}
-                              rx={2}
-                              fill="var(--ctx-neg)"
-                              fillOpacity={0.75}
-                              stroke="var(--ctx-neg-text)"
-                              strokeWidth={0.8}
-                            />
-                          )}
-                          <text
-                            x={midX}
-                            y={midY}
-                            textAnchor="middle"
-                            fill={isConflictEdge ? '#ffffff' : 'var(--ink)'}
-                            className="mono text-[10px]"
-                            style={
-                              isConflictEdge
-                                ? { fontWeight: 600 }
-                                : {
-                                    paintOrder: 'stroke',
-                                    stroke: 'var(--surface)',
-                                    strokeWidth: '4px',
-                                  }
-                            }
-                          >
-                            {edge.relation}
-                          </text>
-                        </g>
-                      );
-                    })}
-
-                  {alignmentGuides.verticalX !== null && (
-                    <line
-                      x1={alignmentGuides.verticalX}
-                      y1={-1000}
-                      x2={alignmentGuides.verticalX}
-                      y2={3000}
-                      stroke="var(--ctx-pos-text)"
-                      strokeWidth={1.2}
-                      strokeDasharray="4 4"
-                    />
-                  )}
-                  {alignmentGuides.horizontalY !== null && (
-                    <line
-                      x1={-1000}
-                      y1={alignmentGuides.horizontalY}
-                      x2={4000}
-                      y2={alignmentGuides.horizontalY}
-                      stroke="var(--ctx-pos-text)"
-                      strokeWidth={1.2}
-                      strokeDasharray="4 4"
-                    />
-                  )}
-
-                  {connectingFromId &&
-                    elements.find((e) => e.id === connectingFromId) && (
-                      <line
-                        x1={
-                          elements.find((e) => e.id === connectingFromId)!
-                            .position.x + 150
-                        }
-                        y1={
-                          elements.find((e) => e.id === connectingFromId)!
-                            .position.y + 24
-                        }
-                        x2={mouseCanvasPos.x}
-                        y2={mouseCanvasPos.y}
-                        stroke="var(--accent)"
-                        strokeWidth={2}
-                        strokeDasharray="4 3"
-                      />
-                    )}
-                </svg>
-
-                {filteredElements.map((el) => {
-                  const isSelected =
-                    selectedId === el.id || aiContextIds.includes(el.id);
-                  const isNodeExpanded = Boolean(expandedNodeIds[el.id]);
-                  const typeHeader = TYPE_HEADERS_RU[el.type].split('-')[0];
-
-                  const nodeContradictions = canvasVisibleContradictions.filter(
-                    (c) =>
-                      c.elementIds.includes(el.id) ||
-                      c.suggestedFix?.targetElementId === el.id
-                  );
-                  const hasConflictOverlay = nodeContradictions.length > 0;
-
-                  const isRejectedIdea =
-                    el.type === 'idea' && Boolean(el.altTo && el.altTo !== '-');
-                  const markerColor =
-                    el.customColor ||
-                    (isRejectedIdea
-                      ? 'var(--ctx-neg-text)'
-                      : el.mvp
-                      ? 'var(--ctx-pos-text)'
-                      : undefined);
-                  const markerSoft = isRejectedIdea
-                    ? 'var(--ctx-neg-soft)'
-                    : el.mvp
-                    ? 'var(--ctx-pos-soft)'
-                    : 'var(--ink-faint)';
-                  const activeStrokeColor = markerColor || 'var(--ink-muted)';
-
-                  return (
-                    <div
-                      key={el.id}
-                      onMouseDown={(e) => {
-                        if (e.button === 2) {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          setSelectedId(el.id);
-                          if (!aiContextIds.includes(el.id)) {
-                            setAiContextIds([el.id]);
-                          }
-                          const rect =
-                            canvasAreaRef.current?.getBoundingClientRect();
-                          if (!rect) return;
-                          const rawX = e.clientX - rect.left;
-                          const rawY = e.clientY - rect.top;
-                          const centerX = Math.max(
-                            185,
-                            Math.min(rect.width - 185, rawX)
-                          );
-                          const centerY = Math.max(
-                            160,
-                            Math.min(rect.height - 160, rawY)
-                          );
-                          setRadialMenu({
-                            mode: 'node',
-                            targetElementId: el.id,
-                            centerX,
-                            centerY,
-                            cursorX: rawX,
-                            cursorY: rawY,
-                            hoveredId: null,
-                          });
-                          return;
-                        }
-                        if (e.button !== 0) return;
-                        e.stopPropagation();
-                        e.preventDefault();
-                        if (
-                          document.activeElement instanceof HTMLElement &&
-                          (document.activeElement.tagName === 'INPUT' ||
-                            document.activeElement.tagName === 'TEXTAREA' ||
-                            document.activeElement.tagName === 'SELECT')
-                        ) {
-                          document.activeElement.blur();
-                        }
-                        setRadialMenu(null);
-                        canvasNodeDownClientRef.current = {
-                          x: e.clientX,
-                          y: e.clientY,
-                        };
-                        const wasCtrl = e.ctrlKey || e.metaKey;
-                        const currentMulti =
-                          aiContextIdsRef.current.length > 0
-                            ? aiContextIdsRef.current
-                            : selectedIdRef.current
-                            ? [selectedIdRef.current]
-                            : [];
-                        const wasAlreadyInMulti = currentMulti.includes(el.id);
-
-                        if (wasCtrl) {
-                          if (!wasAlreadyInMulti) {
-                            const nextMulti = [...currentMulti, el.id];
-                            aiContextIdsRef.current = nextMulti;
-                            setAiContextIds(nextMulti);
-                            selectedIdRef.current = el.id;
-                            setSelectedId(el.id);
-                            setActiveFile(el.fileName);
-                          }
-                        } else {
-                          if (!wasAlreadyInMulti) {
-                            selectedIdRef.current = el.id;
-                            setSelectedId(el.id);
-                            aiContextIdsRef.current = [el.id];
-                            setAiContextIds([el.id]);
-                          } else {
-                            selectedIdRef.current = el.id;
-                            setSelectedId(el.id);
-                          }
-                        }
-
-                        canvasMouseDownInfoRef.current = {
-                          nodeId: el.id,
-                          fileName: el.fileName,
-                          clientX: e.clientX,
-                          clientY: e.clientY,
-                          wasCtrl,
-                          wasAlreadyInMulti,
-                          didMove: false,
-                        };
-
-                        const rect =
-                          canvasAreaRef.current?.getBoundingClientRect();
-                        if (!rect) return;
-                        const snap: Record<string, { x: number; y: number }> =
-                          {};
-                        elementsRef.current.forEach((item) => {
-                          snap[item.id] = {
-                            x: item.position.x,
-                            y: item.position.y,
-                          };
-                        });
-                        dragStartSnapshotRef.current = snap;
-                        const scale = canvasZoom / 100;
-                        const cx =
-                          (e.clientX - rect.left - canvasPan.x) / scale;
-                        const cy =
-                          (e.clientY - rect.top - canvasPan.y) / scale;
-                        draggingNodeIdRef.current = el.id;
-                        setDraggingNodeId(el.id);
-                        setDragOffset({
-                          x: cx - el.position.x,
-                          y: cy - el.position.y,
-                        });
-                      }}
-                      onMouseUp={(e) => {
-                        if (e.button !== 0 || radialMenuRef.current) return;
-                        e.stopPropagation();
-                        const downInfo = canvasMouseDownInfoRef.current;
-                        canvasMouseDownInfoRef.current = null;
-                        const moveDist = Math.hypot(
-                          e.clientX - canvasNodeDownClientRef.current.x,
-                          e.clientY - canvasNodeDownClientRef.current.y
-                        );
-                        const didDrag = Boolean(downInfo?.didMove) || moveDist > 4;
-
-                        if (connectingFromId && connectingFromId !== el.id) {
-                          handleConnectOnCanvas(connectingFromId, el.id);
-                        } else if (!didDrag) {
-                          if (downInfo?.wasCtrl) {
-                            if (downInfo.wasAlreadyInMulti) {
-                              const nextMulti = aiContextIdsRef.current.filter(
-                                (id) => id !== el.id
-                              );
-                              aiContextIdsRef.current = nextMulti;
-                              setAiContextIds(nextMulti);
-                              if (selectedIdRef.current === el.id) {
-                                const nextSel =
-                                  nextMulti[nextMulti.length - 1] || null;
-                                selectedIdRef.current = nextSel;
-                                setSelectedId(nextSel);
-                              }
-                            }
-                          } else {
-                            selectedIdRef.current = el.id;
-                            setSelectedId(el.id);
-                            aiContextIdsRef.current = [el.id];
-                            setAiContextIds([el.id]);
-                            if (
-                              hasConflictOverlay &&
-                              !(e.target as HTMLElement).closest('button')
-                            ) {
-                              openConflictPopupFor(nodeContradictions, el.id);
-                            }
-                          }
-                        }
-                        commitDragSnapshotIfMoved();
-                        setDraggingNodeId(null);
-                        setConnectingFromId(null);
-                        setIsPanningCanvas(false);
-                        setAlignmentGuides({
-                          verticalX: null,
-                          horizontalY: null,
-                        });
-                      }}
-                      onDoubleClick={() => {
-                        setSelectedId(el.id);
-                        setActiveTab('kb');
-                      }}
-                      style={{
-                        left: `${el.position.x}px`,
-                        top: `${el.position.y}px`,
-                        borderTopColor: isSelected ? activeStrokeColor : undefined,
-                        borderRightColor: isSelected ? activeStrokeColor : undefined,
-                        borderBottomColor: isSelected ? activeStrokeColor : undefined,
-                        borderLeftWidth: markerColor ? '3px' : undefined,
-                        borderLeftColor:
-                          markerColor ||
-                          (isSelected ? activeStrokeColor : undefined),
-                        boxShadow: isSelected
-                          ? `0 0 0 1px ${activeStrokeColor}`
-                          : undefined,
-                        backgroundColor: 'var(--bg)',
-                        backgroundImage: isSelected
-                          ? `linear-gradient(${markerSoft}, ${markerSoft})`
-                          : undefined,
-                      }}
-                      className={`sys-node ${isSelected ? 'selected' : ''}`}
-                    >
-                      {/* Negative Contextual Color Dashed Conflict Overlay Frame around Conflicted Node */}
-                      {hasConflictOverlay && (
-                        <div
-                          onMouseDown={(e) => {
-                            if (e.button === 2) return;
-                            e.stopPropagation();
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openConflictPopupFor(nodeContradictions, el.id);
-                          }}
-                          title={`Конфликт ИИ: ${nodeContradictions[0].title} (нажмите для открытия формы конфликта)`}
-                          style={{
-                            position: 'absolute',
-                            inset: '-9px',
-                            border: '1.5px dashed var(--ctx-neg-text)',
-                            borderRadius: '4px',
-                            backgroundColor: 'var(--ctx-neg-soft)',
-                            pointerEvents: 'auto',
-                            cursor: 'pointer',
-                            zIndex: -1,
-                          }}
-                          className="transition-opacity opacity-85 hover:opacity-100"
-                        />
-                      )}
-                      <div className="flex items-center justify-between gap-2 mb-1">
-                        <span className="label">
-                          {typeHeader}
-                          {el.mvp ? ' · MVP' : ''}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                            }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setExpandedNodeIds((prev) => ({
-                                ...prev,
-                                [el.id]: !prev[el.id],
-                              }));
-                            }}
-                            className="pill cursor-pointer hover:border-[var(--ink)] flex items-center justify-center px-1"
-                            title={
-                              isNodeExpanded
-                                ? 'Свернуть компонент'
-                                : 'Развернуть компонент'
-                            }
-                          >
-                            {isNodeExpanded ? (
-                              <ChevronUp size={11} />
-                            ) : (
-                              <ChevronDown size={11} />
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            onMouseDown={(e) => {
-                              e.stopPropagation();
-                              e.preventDefault();
-                              const rect =
-                                canvasAreaRef.current?.getBoundingClientRect();
-                              if (!rect) return;
-                              const scale = canvasZoom / 100;
-                              setConnectingFromId(el.id);
-                              setMouseCanvasPos({
-                                x:
-                                  (e.clientX - rect.left - canvasPan.x) / scale,
-                                y:
-                                  (e.clientY - rect.top - canvasPan.y) / scale,
-                              });
-                            }}
-                            className="pill cursor-crosshair hover:border-[var(--ink)]"
-                            title="Зажмите и перетащите на другой узел"
-                          >
-                            +
-                          </button>
-                        </div>
-                      </div>
-
-                      <div
-                        className="mono font-semibold text-xs truncate"
-                        style={{ color: 'var(--ink)' }}
-                      >
-                        {el.id}
-                      </div>
-
-                      {isNodeExpanded && (
-                        <div className="mt-2 pt-2 border-t border-[var(--border)] text-[11px] space-y-1">
-                          <div className="font-medium truncate">{el.title}</div>
-                          {el.parent && el.parent !== '-' && (
-                            <div className="mono">parent: {el.parent}</div>
-                          )}
-                          {el.type === 'class' &&
-                            (el.fields || []).slice(0, 2).map((f) => (
-                              <div key={f.name} className="mono">
-                                - {f.name}: {f.dataType}
-                              </div>
-                            ))}
-                          {el.type === 'object' &&
-                            (el.values || []).slice(0, 2).map((v) => (
-                              <div key={v.fieldName} className="mono">
-                                {v.fieldName} = {v.value}
-                              </div>
-                            ))}
-                          {el.type === 'component' &&
-                            (el.interfaceItems || []).slice(0, 2).map((it, idx) => (
-                              <div key={idx} className="mono truncate">
-                                + {it}
-                              </div>
-                            ))}
-                          {el.type === 'process' &&
-                            (el.steps || []).slice(0, 2).map((st, idx) => (
-                              <div key={idx} className="mono truncate">
-                                {idx + 1}. {st}
-                              </div>
-                            ))}
-                          {(el.type === 'system' || el.type === 'idea') &&
-                            el.description && (
-                              <div className="mono line-clamp-2">
-                                {el.description}
-                              </div>
-                            )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Right-Click Hold Radial AI Wheel Overlay (Annular Sector Ring + Dotted Fill + Inner Arrow) */}
-              {radialMenu &&
-                (() => {
-                  const cx = radialMenu.centerX;
-                  const cy = radialMenu.centerY;
-                  const rIn = 64;
-                  const rOut = 162;
-                  const rMid = (rIn + rOut) / 2;
-
-                  const dx = radialMenu.cursorX - cx;
-                  const dy = radialMenu.cursorY - cy;
-                  const dist = Math.hypot(dx, dy);
-
-                  const activeOptions = getRadialOptions(
-                    radialMenu.mode,
-                    radialMenu.targetElementId
-                  );
-                  const activeOpt = activeOptions.find(
-                    (o) => o.id === radialMenu.hoveredId
-                  );
-                  const wheelStrokeColor = activeOpt?.isNegative
-                    ? 'var(--ctx-neg-text)'
-                    : 'var(--ctx-pos-text)';
-
-                  // Arrow angle & tip inside inner circle
-                  const arrowAngle =
-                    dist >= 8
-                      ? Math.atan2(dy, dx)
-                      : activeOpt
-                      ? (activeOpt.angleDeg * Math.PI) / 180
-                      : -Math.PI / 2;
-                  const arrowLen =
-                    dist >= 8
-                      ? Math.min(rIn - 14, Math.max(24, dist * 0.72))
-                      : 0;
-                  const tipX = cx + Math.cos(arrowAngle) * arrowLen;
-                  const tipY = cy + Math.sin(arrowAngle) * arrowLen;
-                  const wingLen = 13;
-                  const wingSpread = 0.48;
-                  const wing1X =
-                    tipX - Math.cos(arrowAngle - wingSpread) * wingLen;
-                  const wing1Y =
-                    tipY - Math.sin(arrowAngle - wingSpread) * wingLen;
-                  const wing2X =
-                    tipX - Math.cos(arrowAngle + wingSpread) * wingLen;
-                  const wing2Y =
-                    tipY - Math.sin(arrowAngle + wingSpread) * wingLen;
-
-                  const buildSectorPath = (
-                    startDeg: number,
-                    endDeg: number
-                  ) => {
-                    const sRad = (startDeg * Math.PI) / 180;
-                    const eRad = (endDeg * Math.PI) / 180;
-                    const x1Out = cx + rOut * Math.cos(sRad);
-                    const y1Out = cy + rOut * Math.sin(sRad);
-                    const x2Out = cx + rOut * Math.cos(eRad);
-                    const y2Out = cy + rOut * Math.sin(eRad);
-                    const x2In = cx + rIn * Math.cos(eRad);
-                    const y2In = cy + rIn * Math.sin(eRad);
-                    const x1In = cx + rIn * Math.cos(sRad);
-                    const y1In = cy + rIn * Math.sin(sRad);
-                    return [
-                      `M ${x1Out} ${y1Out}`,
-                      `A ${rOut} ${rOut} 0 0 1 ${x2Out} ${y2Out}`,
-                      `L ${x2In} ${y2In}`,
-                      `A ${rIn} ${rIn} 0 0 0 ${x1In} ${y1In}`,
-                      'Z',
-                    ].join(' ');
-                  };
-
-                  return (
-                    <div
-                      className="absolute inset-0 z-40 pointer-events-none select-none"
-                      style={{ overflow: 'hidden' }}
-                    >
-                      <svg className="absolute inset-0 w-full h-full pointer-events-none">
-                        <defs>
-                          {/* Dotted Halftone Pattern for Positive Contextual Color */}
-                          <pattern
-                            id="radial-dots-pos"
-                            width="5"
-                            height="5"
-                            patternUnits="userSpaceOnUse"
-                          >
-                            <rect
-                              width="5"
-                              height="5"
-                              fill="var(--ctx-pos-soft)"
-                            />
-                            <circle
-                              cx="2.5"
-                              cy="2.5"
-                              r="1.15"
-                              fill="var(--ctx-pos-text)"
-                              fillOpacity="0.85"
-                            />
-                          </pattern>
-                          {/* Dotted Halftone Pattern for Negative Contextual Color */}
-                          <pattern
-                            id="radial-dots-neg"
-                            width="5"
-                            height="5"
-                            patternUnits="userSpaceOnUse"
-                          >
-                            <rect
-                              width="5"
-                              height="5"
-                              fill="var(--ctx-neg-soft)"
-                            />
-                            <circle
-                              cx="2.5"
-                              cy="2.5"
-                              r="1.15"
-                              fill="var(--ctx-neg-text)"
-                              fillOpacity="0.85"
-                            />
-                          </pattern>
-                        </defs>
-
-                        {/* Annular Sector Slices */}
-                        {activeOptions.map((opt) => {
-                          const d = buildSectorPath(opt.startDeg, opt.endDeg);
-                          const isHovered = radialMenu.hoveredId === opt.id;
-                          const patternFill = opt.isNegative
-                            ? 'url(#radial-dots-neg)'
-                            : 'url(#radial-dots-pos)';
-
-                          return (
-                            <g
-                              key={opt.id}
-                              style={{
-                                pointerEvents: 'auto',
-                                cursor: 'pointer',
-                              }}
-                              onMouseEnter={() =>
-                                setRadialMenu((prev) =>
-                                  prev ? { ...prev, hoveredId: opt.id } : null
-                                )
-                              }
-                            >
-                              {/* Base Dark Sector Surface */}
-                              <path
-                                d={d}
-                                fill="var(--bg)"
-                                fillOpacity={0.92}
-                                stroke={wheelStrokeColor}
-                                strokeWidth={1.5}
-                              />
-                              {/* Dotted Halftone Fill when Hovered */}
-                              {isHovered && (
-                                <path
-                                  d={d}
-                                  fill={patternFill}
-                                  stroke={
-                                    opt.isNegative
-                                      ? 'var(--ctx-neg-text)'
-                                      : 'var(--ctx-pos-text)'
-                                  }
-                                  strokeWidth={2}
-                                />
-                              )}
-                            </g>
-                          );
-                        })}
-
-                        {/* Inner Hub Circle */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={rIn}
-                          fill="var(--bg)"
-                          fillOpacity={0.95}
-                          stroke={wheelStrokeColor}
-                          strokeWidth={1.6}
-                        />
-
-                        {/* Outer Ring Circle */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={rOut}
-                          fill="none"
-                          stroke={wheelStrokeColor}
-                          strokeWidth={1.6}
-                        />
-
-                        {/* Center Pivot Dot */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={3}
-                          fill={wheelStrokeColor}
-                        />
-
-                        {/* Directional Pointer Arrow inside Inner Circle */}
-                        {arrowLen > 0 && (
-                          <g>
-                            <line
-                              x1={cx}
-                              y1={cy}
-                              x2={tipX}
-                              y2={tipY}
-                              stroke={wheelStrokeColor}
-                              strokeWidth={2.8}
-                              strokeLinecap="round"
-                            />
-                            <path
-                              d={`M ${wing1X} ${wing1Y} L ${tipX} ${tipY} L ${wing2X} ${wing2Y}`}
-                              fill="none"
-                              stroke={wheelStrokeColor}
-                              strokeWidth={2.8}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </g>
-                        )}
-                      </svg>
-
-                      {/* Sector Text Labels inside each Wedge */}
-                      {activeOptions.map((opt) => {
-                        const rad = (opt.angleDeg * Math.PI) / 180;
-                        const lx = cx + Math.cos(rad) * rMid;
-                        const ly = cy + Math.sin(rad) * rMid;
-                        const isHovered = radialMenu.hoveredId === opt.id;
-
-                        return (
-                          <div
-                            key={opt.id}
-                            style={{
-                              left: `${lx}px`,
-                              top: `${ly}px`,
-                              maxWidth: '92px',
-                              transform: 'translate(-50%, -50%)',
-                              backgroundColor: isHovered
-                                ? 'var(--bg)'
-                                : 'transparent',
-                              borderColor: isHovered
-                                ? opt.isNegative
-                                  ? 'var(--ctx-neg-text)'
-                                  : 'var(--ctx-pos-text)'
-                                : 'transparent',
-                            }}
-                            className={`absolute px-1 py-0.5 rounded pointer-events-none text-center transition-transform duration-75 ${
-                              isHovered ? 'border scale-105' : ''
-                            }`}
-                          >
-                            <div
-                              style={{
-                                color: isHovered
-                                  ? opt.isNegative
-                                    ? 'var(--ctx-neg-text)'
-                                    : 'var(--ctx-pos-text)'
-                                  : 'var(--ink)',
-                                textShadow: '0 1px 3px rgba(0,0,0,0.85)',
-                              }}
-                              className="text-[10.5px] font-semibold leading-tight truncate"
-                            >
-                              {opt.label}
-                            </div>
-                            <div
-                              style={{
-                                color: isHovered
-                                  ? 'var(--ink)'
-                                  : 'var(--ink-muted)',
-                                textShadow: '0 1px 2px rgba(0,0,0,0.85)',
-                              }}
-                              className="mono text-[9px] leading-tight truncate"
-                            >
-                              {opt.sublabel}
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                      {/* Subtle Center Context Badge & Hint inside Inner Hub */}
-                      {radialMenu.mode === 'node' &&
-                        radialMenu.targetElementId && (
-                          <div
-                            style={{
-                              left: `${cx}px`,
-                              top: `${cy - 18}px`,
-                              transform: 'translate(-50%, -50%)',
-                              color: 'var(--ctx-pos-text)',
-                            }}
-                            className="absolute mono text-[9px] font-semibold tracking-tight pointer-events-none truncate max-w-[94px]"
-                          >
-                            {radialMenu.targetElementId}
-                          </div>
-                        )}
-                      {arrowLen === 0 && (
-                        <div
-                          style={{
-                            left: `${cx}px`,
-                            top: `${cy + 20}px`,
-                            transform: 'translate(-50%, -50%)',
-                            color: 'var(--ink-muted)',
-                          }}
-                          className="absolute mono text-[9px] uppercase tracking-wider pointer-events-none"
-                        >
-                          НАВЕДИТЕ
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-            </div>
-          </div>
-        </div>
-      )}
+      {activeTab === 'canvas' && <Suspense fallback={<div className="h-full w-full" aria-busy="true" aria-label={tx('Загрузка холста…', 'Loading canvas…')} />}><CanvasWorkspaceView context={canvasContext} /></Suspense>}
 
       {/* =================================================================
           TAB 3: БИБЛИОТЕКА ЮНИТОВ
          ================================================================= */}
       {activeTab === 'library' && (
-        <div className="workspace-2col">
-          <button
-            type="button"
-            onClick={() => setLeftPanelOpen(true)}
-            className={`btn p-1.5 panel-expand-btn left ${
-              leftPanelOpen ? 'is-hidden' : ''
-            }`}
-            title="Развернуть левую панель"
-          >
-            <PanelLeftOpen size={15} />
-          </button>
-
-          <div
-            className={`panel files-column ${
-              !leftPanelOpen ? 'collapsed' : ''
-            }`}
-          >
-            <div className="files-column-inner">
-              <div className="p-3 border-b border-[var(--border)] shrink-0 flex items-center gap-1.5">
-                <input
-                  type="text"
-                  placeholder="Поиск по библиотеке..."
-                  value={libSearch}
-                  onChange={(e) => setLibSearch(e.target.value)}
-                  className="sys-input flex-1 min-w-0 text-xs"
-                />
-                <button
-                  type="button"
-                  onClick={() => setLeftPanelOpen(false)}
-                  className="btn p-1.5 shrink-0"
-                  title="Свернуть левую панель"
-                >
-                  <PanelLeftClose size={15} />
-                </button>
-              </div>
-              <div className="panel-header">
-                <span className="label">{t.categoriesHeader}</span>
-              </div>
-              <div className="p-3 space-y-1">
-                {(
-                  [
-                    { key: 'all', label: 'Все юниты' },
-                    { key: 'system', label: 'Системы' },
-                    { key: 'class', label: 'Классы' },
-                    { key: 'component', label: 'Компоненты' },
-                    { key: 'process', label: 'Процессы' },
-                    { key: 'object', label: 'Объекты' },
-                    { key: 'idea', label: 'Идеи' },
-                  ] as { key: 'all' | ElementType; label: string }[]
-                ).map((cat) => (
-                  <div
-                    key={cat.key}
-                    onClick={() => setLibCategoryFilter(cat.key)}
-                    className={`tree-node ${
-                      libCategoryFilter === cat.key ? 'active' : ''
-                    }`}
-                  >
-                    <span>{cat.label}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="panel-header mt-2">
-                <span className="label">Перетащите в библиотеку</span>
-              </div>
-              <div className="p-3 flex-1 overflow-y-auto space-y-1">
-                {elements.map((el) => (
-                  <div
-                    key={el.id}
-                    draggable
-                    onDragStart={(e) =>
-                      e.dataTransfer.setData('text/plain', el.id)
-                    }
-                    className="tree-node"
-                  >
-                    <span className="mono truncate">{el.id}</span>
-                    <span className="pill">drag</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="panel editor-column">
-            <div
-              className="editor-scroll"
-              style={{ paddingLeft: leftPanelOpen ? '24px' : '52px' }}
-            >
-              <div className="editor-meta">
-                <span className="label">REUSABLE ARCHITECTURE UNITS</span>
-                <span className="pill">Юнитов: {unitLibrary.length}</span>
-              </div>
-              <div className="title-display" style={{ fontSize: '2rem' }}>
-                Библиотека юнитов
-              </div>
-
-              <div className="field-grid">
-                {unitLibrary
-                  .filter((u) => {
-                    if (
-                      libCategoryFilter !== 'all' &&
-                      u.element.type !== libCategoryFilter
-                    ) {
-                      return false;
-                    }
-                    if (libSearch.trim()) {
-                      const q = libSearch.toLowerCase();
-                      return (
-                        u.element.title.toLowerCase().includes(q) ||
-                        u.element.id.toLowerCase().includes(q)
-                      );
-                    }
-                    return true;
-                  })
-                  .map((unit) => (
-                    <div
-                      key={unit.unitId}
-                      className="field-row items-center"
-                      style={{ gridTemplateColumns: '1fr 1fr auto' }}
-                    >
-                      <div>
-                        <div className="font-semibold text-sm">
-                          {unit.element.title}
-                        </div>
-                        <div className="mono text-xs">{unit.element.id}</div>
-                      </div>
-                      <div className="mono">{unit.category}</div>
-                      <button
-                        type="button"
-                        onClick={() => handleAddUnitToProject(unit)}
-                        className="btn primary"
-                      >
-                        Добавить в проект
-                      </button>
-                    </div>
-                  ))}
-              </div>
-
-              <div
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const raw = e.dataTransfer.getData('text/plain');
-                  if (!raw) return;
-                  let ids: string[] = [raw];
-                  try {
-                    const parsed = JSON.parse(raw);
-                    if (Array.isArray(parsed)) ids = parsed;
-                  } catch {
-                    ids = [raw];
-                  }
-                  ids.forEach((id) => {
-                    const found = elements.find((x) => x.id === id);
-                    if (found) {
-                      handleSaveCurrentToLibrary(found);
-                    }
-                  });
-                }}
-                className="mt-6 p-8 border border-dashed border-[var(--border)] rounded text-center mono"
-              >
-                Перетащите элемент сюда, чтобы сохранить его в библиотеку
-              </div>
-            </div>
-          </div>
-        </div>
+        <Suspense fallback={<div className="editor-scroll min-h-0 flex-1 text-sm text-[var(--ink-muted)]" aria-busy="true">{tx('Загрузка библиотеки…', 'Loading library…')}</div>}>
+        <UnitLibraryView
+          leftPanelOpen={leftPanelOpen}
+          setLeftPanelOpen={setLeftPanelOpen}
+          locale={locale}
+          elements={elements}
+          unitLibrary={unitLibrary}
+          search={libSearch}
+          onSearchChange={setLibSearch}
+          category={libCategoryFilter}
+          onCategoryChange={setLibCategoryFilter}
+          onAddUnit={handleAddUnitToProject}
+          onSaveElements={handleQueueLibrarySave}
+        />
+        </Suspense>
       )}
-
+      {librarySaveQueue.length > 0 ? (
+        <Suspense fallback={<div role="status" className="fixed inset-0 z-[100] grid place-items-center bg-black/60 p-4 text-sm text-white">{tx('Загрузка каталога иконок…', 'Loading icon catalog…')}</div>}>
+          <LibraryIconPicker
+            key={`${librarySaveQueue[0]?.id || 'closed'}-${librarySaveQueue.length}`}
+            open
+            locale={locale}
+            elementType={librarySaveQueue[0]?.type ?? null}
+            elementTitle={librarySaveQueue[0]?.title ?? ''}
+            defaultIcon={defaultLibraryIcon(librarySaveQueue[0]?.type ?? 'object')}
+            selectedIcon={libraryIconDraft}
+            queueTotal={librarySaveQueue.length}
+            onIconChange={setLibraryIconDraft}
+            onConfirm={handleConfirmLibrarySave}
+            onClose={() => setLibrarySaveQueue([])}
+          />
+        </Suspense>
+      ) : null}
       {/* =================================================================
           TAB 4: НАСТРОЙКИ (With visual buttons for contextual color pairs)
          ================================================================= */}
-      {activeTab === 'settings' && (
-        <div className="workspace-2col">
-          <button
-            type="button"
-            onClick={() => setLeftPanelOpen(true)}
-            className={`btn p-1.5 panel-expand-btn left ${
-              leftPanelOpen ? 'is-hidden' : ''
-            }`}
-            title="Развернуть левую панель"
-          >
-            <PanelLeftOpen size={15} />
-          </button>
-
-          <div
-            className={`panel files-column ${
-              !leftPanelOpen ? 'collapsed' : ''
-            }`}
-          >
-            <div className="files-column-inner">
-              <div className="panel-header">
-                <span className="label">{t.sectionsHeader}</span>
-                <button
-                  type="button"
-                  onClick={() => setLeftPanelOpen(false)}
-                  className="btn p-1.5"
-                  title="Свернуть левую панель"
-                >
-                  <PanelLeftClose size={15} />
-                </button>
-              </div>
-              <div className="p-3 space-y-1">
-                {[
-                  { id: 'theme', label: 'Тема оформления' },
-                  { id: 'colors', label: 'Контекстные цвета' },
-                  { id: 'ai', label: 'ИИ-ассистент (API)' },
-                  { id: 'git', label: 'Git-версионирование' },
-                  { id: 'lang', label: 'Язык интерфейса' },
-                ].map((sec) => (
-                  <div
-                    key={sec.id}
-                    onClick={() => setActiveSettingsSection(sec.id)}
-                    className={`tree-node ${
-                      activeSettingsSection === sec.id ? 'active' : ''
-                    }`}
-                  >
-                    <span>{sec.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="panel editor-column">
-            <div
-              className="editor-scroll"
-              style={{ paddingLeft: leftPanelOpen ? '24px' : '52px' }}
-            >
-              <div className="editor-meta">
-                <span className="label">SYSTEM CONFIGURATION</span>
-              </div>
-              <div className="title-display" style={{ fontSize: '2rem' }}>
-                Настройки
-              </div>
-
-              <div className="field-grid">
-                {/* 1. Theme */}
-                <div className="field-row">
-                  <div className="field-label">Тема оформления</div>
-                  <div className="field-value space-y-2">
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      {(
-                        [
-                          {
-                            key: 'dark',
-                            label: 'Тёмная (по умолчанию)',
-                          },
-                          {
-                            key: 'classic',
-                            label: 'Классическая',
-                          },
-                          { key: 'light', label: 'Светлая' },
-                          { key: 'system', label: 'Системная' },
-                        ] as { key: ThemeMode; label: string }[]
-                      ).map((opt) => (
-                        <button
-                          key={opt.key}
-                          type="button"
-                          onClick={() => setThemeMode(opt.key)}
-                          className={`btn ${
-                            themeMode === opt.key ? 'primary' : ''
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="mono text-[11px]">
-                      {themeMode === 'classic'
-                        ? 'Классическая: строгая чёрно-белая палитра (#000 / #FFF) с контекстными цветами для положительных и отрицательных элементов.'
-                        : themeMode === 'dark'
-                        ? 'Тёмная (System Dark): тема по умолчанию с глубоким фоном #0C0C0E и акцентной подсветкой.'
-                        : themeMode === 'light'
-                        ? 'Светлая: мягкая светлая палитра с акцентной подсветкой.'
-                        : 'Системная: автоматически следует настройкам ОС.'}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Visual Contextual Color Buttons */}
-                <div className="field-row">
-                  <div className="field-label">
-                    Положительный контекст («Да», Применить)
-                  </div>
-                  <div className="field-value flex flex-wrap gap-2">
-                    {(
-                      Object.keys(POSITIVE_PALETTES) as PositivePaletteKey[]
-                    ).map((key) => {
-                      const pal = POSITIVE_PALETTES[key];
-                      const isActive = posPalette === key;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => setPosPalette(key)}
-                          className="btn"
-                          style={{
-                            borderColor: isActive ? pal.main : 'var(--border)',
-                            backgroundColor: isActive
-                              ? pal.soft
-                              : 'transparent',
-                          }}
-                        >
-                          <span
-                            className="w-3 h-3 rounded-sm inline-block"
-                            style={{ backgroundColor: pal.main }}
-                          />
-                          <span>{pal.labelRu}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="field-row">
-                  <div className="field-label">
-                    Отрицательный контекст («Нет», Отклонить)
-                  </div>
-                  <div className="field-value flex flex-wrap gap-2">
-                    {(
-                      Object.keys(NEGATIVE_PALETTES) as NegativePaletteKey[]
-                    ).map((key) => {
-                      const pal = NEGATIVE_PALETTES[key];
-                      const isActive = negPalette === key;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => setNegPalette(key)}
-                          className="btn"
-                          style={{
-                            borderColor: isActive ? pal.main : 'var(--border)',
-                            backgroundColor: isActive
-                              ? pal.soft
-                              : 'transparent',
-                          }}
-                        >
-                          <span
-                            className="w-3 h-3 rounded-sm inline-block"
-                            style={{ backgroundColor: pal.main }}
-                          />
-                          <span>{pal.labelRu}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="field-row">
-                  <div className="field-label">Предпросмотр пары</div>
-                  <div className="field-value flex items-center gap-3">
-                    <span className="btn pos">Да · Применить</span>
-                    <span className="btn neg">Нет · Отклонить</span>
-                  </div>
-                </div>
-
-                {/* 3. AI Assistant */}
-                <div className="field-row">
-                  <div className="field-label">ИИ-ассистент & Лимиты</div>
-                  <div className="field-value space-y-5 w-full">
-                    {/* Endpoint & Key */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3.5 border border-[var(--border)] rounded-lg bg-[var(--surface-hover)]">
-                      <div>
-                        <label className="label block mb-1">Endpoint API</label>
-                        <input
-                          type="text"
-                          value={aiEndpoint}
-                          onChange={(e) => setAiEndpoint(e.target.value)}
-                          className="sys-input w-full mono text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="label block mb-1">API Key</label>
-                        <div className="flex gap-2">
-                          <input
-                            type="password"
-                            value={aiApiKey}
-                            onChange={(e) => setAiApiKey(e.target.value)}
-                            className="sys-input flex-1 mono text-xs"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => showNotice('API ключ сохранён')}
-                            className="btn pos text-xs shrink-0"
-                          >
-                            Сохранить
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-medium">
-                        <input
-                          type="checkbox"
-                          checked={aiEnabled}
-                          onChange={(e) => setAiEnabled(e.target.checked)}
-                        />
-                        <span>Включить ИИ-функции ассистента</span>
-                      </label>
-                      <button
-                        type="button"
-                        onClick={handleSimulateAiRequest}
-                        className="btn text-xs flex items-center gap-1.5"
-                        title="Сгенерировать тестовый запрос для проверки истории и графиков"
-                      >
-                        <Zap size={13} className="text-[var(--accent)]" />
-                        <span>Симулировать запрос</span>
-                      </button>
-                    </div>
-
-                    {/* Artificial Limits Section */}
-                    <div className="space-y-3 pt-2 border-t border-[var(--border)]">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
-                          <Gauge size={15} className="text-[var(--accent)]" />
-                          <span>Искусственные лимиты использования ключа</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleResetTotalTokens}
-                          className="btn neg text-xs flex items-center gap-1.5 py-1 px-2.5"
-                          title="Сбросить накопленный счётчик токенов TT"
-                        >
-                          <RotateCcw size={12} />
-                          <span>Сбросить TT (Всего)</span>
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                        {/* RPM */}
-                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold mono text-[var(--accent)]">RPM</span>
-                            <span className="text-[10px] text-[var(--ink-muted)]">Запросы/мин</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={1}
-                              value={aiLimits.rpm}
-                              onChange={(e) =>
-                                setAiLimits((prev) => ({
-                                  ...prev,
-                                  rpm: Math.max(1, parseInt(e.target.value) || 1),
-                                }))
-                              }
-                              className="sys-input w-full text-xs mono py-1 px-2"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
-                              <span>Использовано: {aiUsage.rpm}</span>
-                              <span>{Math.round((aiUsage.rpm / aiLimits.rpm) * 100)}%</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-[var(--accent)] transition-all"
-                                style={{ width: `${Math.min(100, (aiUsage.rpm / aiLimits.rpm) * 100)}%` }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* RPD */}
-                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold mono text-[var(--accent)]">RPD</span>
-                            <span className="text-[10px] text-[var(--ink-muted)]">Запросы/день</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={1}
-                              value={aiLimits.rpd}
-                              onChange={(e) =>
-                                setAiLimits((prev) => ({
-                                  ...prev,
-                                  rpd: Math.max(1, parseInt(e.target.value) || 1),
-                                }))
-                              }
-                              className="sys-input w-full text-xs mono py-1 px-2"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
-                              <span>Использовано: {aiUsage.rpd}</span>
-                              <span>{Math.round((aiUsage.rpd / aiLimits.rpd) * 100)}%</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-[var(--accent)] transition-all"
-                                style={{ width: `${Math.min(100, (aiUsage.rpd / aiLimits.rpd) * 100)}%` }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* TPM */}
-                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold mono text-[var(--ctx-pos-text)]">TPM</span>
-                            <span className="text-[10px] text-[var(--ink-muted)]">Токены/день</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={100}
-                              step={1000}
-                              value={aiLimits.tpm}
-                              onChange={(e) =>
-                                setAiLimits((prev) => ({
-                                  ...prev,
-                                  tpm: Math.max(100, parseInt(e.target.value) || 100),
-                                }))
-                              }
-                              className="sys-input w-full text-xs mono py-1 px-2"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
-                              <span>Использовано: {aiUsage.tpm.toLocaleString()}</span>
-                              <span>{Math.round((aiUsage.tpm / aiLimits.tpm) * 100)}%</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-[var(--ctx-pos-text)] transition-all"
-                                style={{ width: `${Math.min(100, (aiUsage.tpm / aiLimits.tpm) * 100)}%` }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* TT */}
-                        <div className="p-3 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold mono text-[var(--ctx-neg-text)]">TT</span>
-                            <span className="text-[10px] text-[var(--ink-muted)]">Токены всего</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={1000}
-                              step={10000}
-                              value={aiLimits.tt}
-                              onChange={(e) =>
-                                setAiLimits((prev) => ({
-                                  ...prev,
-                                  tt: Math.max(1000, parseInt(e.target.value) || 1000),
-                                }))
-                              }
-                              className="sys-input w-full text-xs mono py-1 px-2"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-[10px] mono text-[var(--ink-muted)]">
-                              <span>Использовано: {aiUsage.tt.toLocaleString()}</span>
-                              <span>{aiLimits.tt > 0 ? Math.round((aiUsage.tt / aiLimits.tt) * 100) : 0}%</span>
-                            </div>
-                            <div className="w-full h-1.5 bg-[var(--surface-hover)] rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-[var(--ctx-neg-text)] transition-all"
-                                style={{
-                                  width: `${aiLimits.tt > 0 ? Math.min(100, (aiUsage.tt / aiLimits.tt) * 100) : 0}%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Chart Section */}
-                    <div className="space-y-3 pt-3 border-t border-[var(--border)]">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
-                          <BarChart2 size={15} className="text-[var(--accent)]" />
-                          <span>График активности и потребления токенов</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => setAiChartMetric('tokens')}
-                            className={`pill cursor-pointer px-2.5 py-1 text-[11px] ${
-                              aiChartMetric === 'tokens' ? 'border-[var(--accent)] text-[var(--accent)]' : ''
-                            }`}
-                          >
-                            Токены (TPM)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setAiChartMetric('requests')}
-                            className={`pill cursor-pointer px-2.5 py-1 text-[11px] ${
-                              aiChartMetric === 'requests' ? 'border-[var(--accent)] text-[var(--accent)]' : ''
-                            }`}
-                          >
-                            Запросы (RPM)
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* SVG Bar Chart */}
-                      <div className="p-4 border border-[var(--border)] rounded-xl bg-[var(--bg)] space-y-2">
-                        <div className="h-32 flex items-end justify-between gap-1.5 pt-4 px-2 relative">
-                          {/* Reference line */}
-                          <div className="absolute left-0 right-0 top-6 border-b border-dashed border-[var(--border)] pointer-events-none" />
-                          <span className="absolute left-2 top-2 text-[9px] mono text-[var(--ink-muted)]">
-                            {aiChartMetric === 'tokens' ? 'Лимит TPM: 90k' : 'Лимит RPM: 60'}
-                          </span>
-
-                          {[
-                            { hour: '10:00', tokens: 12000, requests: 8 },
-                            { hour: '11:00', tokens: 28000, requests: 18 },
-                            { hour: '12:00', tokens: 19500, requests: 12 },
-                            { hour: '13:00', tokens: 8400, requests: 5 },
-                            { hour: '14:00', tokens: 35000, requests: 22 },
-                            { hour: '15:00', tokens: 14200, requests: 9 },
-                            { hour: '16:00', tokens: 48000, requests: 31 },
-                            { hour: '17:00', tokens: 28400, requests: 14 },
-                          ].map((bar, idx) => {
-                            const val = aiChartMetric === 'tokens' ? bar.tokens : bar.requests;
-                            const maxVal = aiChartMetric === 'tokens' ? 90000 : 60;
-                            const heightPercent = Math.min(100, Math.max(8, (val / maxVal) * 100));
-                            return (
-                              <div
-                                key={idx}
-                                className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end group cursor-pointer relative"
-                              >
-                                <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute -top-8 bg-[var(--surface)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[9px] mono text-[var(--ink)] shadow-md z-10 whitespace-nowrap pointer-events-none">
-                                  {bar.hour}: {val.toLocaleString()} {aiChartMetric === 'tokens' ? 'ток.' : 'запр.'}
-                                </div>
-                                <div
-                                  className="w-full rounded-t transition-all group-hover:opacity-80"
-                                  style={{
-                                    height: `${heightPercent}%`,
-                                    backgroundColor:
-                                      aiChartMetric === 'tokens' ? 'var(--ctx-pos-text)' : 'var(--accent)',
-                                  }}
-                                />
-                                <span className="text-[9px] mono text-[var(--ink-muted)] shrink-0">
-                                  {bar.hour}
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* History Table */}
-                    <div className="space-y-3 pt-3 border-t border-[var(--border)]">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--ink)]">
-                          <Activity size={15} className="text-[var(--accent)]" />
-                          <span>История использования ключа ({aiUsageHistory.length})</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAiUsageHistory([]);
-                            showNotice('История использования очищена');
-                          }}
-                          className="btn text-[11px] py-1 px-2"
-                        >
-                          Очистить историю
-                        </button>
-                      </div>
-
-                      <div className="border border-[var(--border)] rounded-xl overflow-hidden bg-[var(--bg)]">
-                        <div className="max-h-56 overflow-y-auto">
-                          <table className="w-full text-left border-collapse text-xs">
-                            <thead>
-                              <tr className="border-b border-[var(--border)] bg-[var(--surface-hover)] text-[10px] mono text-[var(--ink-muted)] uppercase">
-                                <th className="p-2.5">Время</th>
-                                <th className="p-2.5">Действие</th>
-                                <th className="p-2.5">Модель</th>
-                                <th className="p-2.5 text-right">Токены</th>
-                                <th className="p-2.5 text-right">Задержка</th>
-                                <th className="p-2.5 text-center">Статус</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-[var(--border)] mono text-[11px]">
-                              {aiUsageHistory.length === 0 ? (
-                                <tr>
-                                  <td colSpan={6} className="p-4 text-center text-[var(--ink-muted)] text-xs">
-                                    История пуста
-                                  </td>
-                                </tr>
-                              ) : (
-                                aiUsageHistory.map((item) => (
-                                  <tr
-                                    key={item.id}
-                                    className="hover:bg-[var(--surface-hover)] transition-colors"
-                                  >
-                                    <td className="p-2.5 text-[var(--ink-muted)]">{item.timestamp}</td>
-                                    <td className="p-2.5 font-medium text-[var(--ink)]">{item.action}</td>
-                                    <td className="p-2.5 text-[var(--ink-muted)]">{item.model}</td>
-                                    <td className="p-2.5 text-right font-bold text-[var(--ctx-pos-text)]">
-                                      {item.totalTokens.toLocaleString()}
-                                    </td>
-                                    <td className="p-2.5 text-right text-[var(--ink-muted)]">
-                                      {item.latencyMs}ms
-                                    </td>
-                                    <td className="p-2.5 text-center">
-                                      <span className="pill text-[9px] bg-[var(--ctx-pos-soft)] text-[var(--ctx-pos-text)] border-[var(--ctx-pos-border)]">
-                                        {item.status}
-                                      </span>
-                                    </td>
-                                  </tr>
-                                ))
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 4. Git Versioning */}
-                <div className="field-row">
-                  <div className="field-label">Git-версионирование</div>
-                  <div className="field-value space-y-3">
-                    <div className="flex items-center justify-between">
-                      <label className="inline-flex items-center gap-2 cursor-pointer text-xs">
-                        <input
-                          type="checkbox"
-                          checked={gitEnabled}
-                          onChange={(e) => setGitEnabled(e.target.checked)}
-                        />
-                        <span>
-                          Подключить git к проекту (ветка: main, изменений:{' '}
-                          {uncommittedChanges})
-                        </span>
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => setGitHistoryOpen((v) => !v)}
-                        className="btn"
-                      >
-                        {gitHistoryOpen
-                          ? 'Скрыть историю изменений'
-                          : 'Открыть историю изменений'}
-                      </button>
-                    </div>
-
-                    {gitHistoryOpen && (
-                      <div className="space-y-3 pt-2 border-t border-[var(--border)]">
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            placeholder="Сообщение коммита (.pgr diff)..."
-                            value={commitMsgInput}
-                            onChange={(e) => setCommitMsgInput(e.target.value)}
-                            className="sys-input flex-1"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const hash = Math.random()
-                                .toString(16)
-                                .slice(2, 9);
-                              const newCommit: GitCommit = {
-                                id: `commit_${Date.now()}`,
-                                hash,
-                                message:
-                                  commitMsgInput.trim() ||
-                                  'Обновление структуры плана (.pgr)',
-                                timestamp: new Date()
-                                  .toISOString()
-                                  .slice(0, 16)
-                                  .replace('T', ' '),
-                                author: 'main',
-                                filesSnapshot: createSnapshotMap(
-                                  elements,
-                                  files
-                                ),
-                                elementsSnapshot: JSON.parse(
-                                  JSON.stringify(elements)
-                                ),
-                              };
-                              setCommits((prev) => [newCommit, ...prev]);
-                              setCommitMsgInput('');
-                              setUncommittedChanges(0);
-                              showNotice(`Зафиксирован коммит #${hash}`);
-                            }}
-                            className="btn pos"
-                          >
-                            Закоммитить .pgr
-                          </button>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <span className="label">Дифф файла:</span>
-                          {files.map((f) => (
-                            <button
-                              key={f}
-                              type="button"
-                              onClick={() => setDiffFileSelect(f)}
-                              className="pill cursor-pointer"
-                              style={{
-                                borderColor:
-                                  diffFileSelect === f
-                                    ? 'var(--accent)'
-                                    : undefined,
-                                color:
-                                  diffFileSelect === f
-                                    ? 'var(--accent)'
-                                    : undefined,
-                              }}
-                            >
-                              {f}
-                            </button>
-                          ))}
-                        </div>
-
-                        <div className="p-3 border border-[var(--border)] rounded bg-[var(--bg)] max-h-48 overflow-y-auto mono text-xs">
-                          {computeLineDiff(
-                            commits[0]?.filesSnapshot[diffFileSelect] || '',
-                            serializeFileWithRanges(elements, diffFileSelect)
-                              .content
-                          ).map((dl, idx) => (
-                            <div
-                              key={idx}
-                              className="px-1"
-                              style={{
-                                backgroundColor:
-                                  dl.type === 'added'
-                                    ? 'var(--ctx-pos-soft)'
-                                    : dl.type === 'removed'
-                                    ? 'var(--ctx-neg-soft)'
-                                    : 'transparent',
-                                color:
-                                  dl.type === 'added'
-                                    ? 'var(--ctx-pos-text)'
-                                    : dl.type === 'removed'
-                                    ? 'var(--ctx-neg-text)'
-                                    : 'var(--ink-muted)',
-                              }}
-                            >
-                              {dl.type === 'added'
-                                ? '+ '
-                                : dl.type === 'removed'
-                                ? '- '
-                                : '  '}
-                              {dl.content}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* 5. Language */}
-                <div className="field-row">
-                  <div className="field-label">Язык интерфейса</div>
-                  <div className="field-value flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setLocale('ru')}
-                      className={`btn ${locale === 'ru' ? 'primary' : ''}`}
-                    >
-                      Русский (по умолчанию)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setLocale('en')}
-                      className={`btn ${locale === 'en' ? 'primary' : ''}`}
-                    >
-                      English
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {activeTab === 'settings' && (<div className="editor-scroll min-h-0 flex-1">
+        <nav className="flex flex-wrap gap-2 border-b border-[var(--border)] px-4 py-3" aria-label={locale === 'ru' ? 'Разделы настроек' : 'Settings sections'}>
+          <button type="button" className={`btn ${activeSettingsSection !== 'git' ? 'primary' : ''}`} aria-pressed={activeSettingsSection !== 'git'} onClick={() => setActiveSettingsSection('theme')}>{locale === 'ru' ? 'Настройки' : 'Preferences'}</button>
+          <button type="button" className={`btn ${activeSettingsSection === 'git' ? 'primary' : ''}`} aria-pressed={activeSettingsSection === 'git'} onClick={() => { setActiveSettingsSection('git'); void git.refreshStatus(); }}>{locale === 'ru' ? 'Git' : 'Git'}</button>
+        </nav>
+        {activeSettingsSection === 'git' ? (
+        <NativeGitView available={git.available && gitEnabled} branch={git.branch} locale={locale} branches={git.branches} dirtyFiles={git.dirtyFiles} commits={git.commits.map(({ hash, message, timestamp }) => ({ hash, message, timestamp }))} diff={git.diffText} files={workspace.files} selectedFile={git.selectedFile} error={git.error}
+          onRefresh={async () => { await git.refreshStatus(); await git.refreshDiff(); }}
+          onCommit={async (message) => { await workspace.runWorkspaceOperation(async () => { await desktopInvoke('git_commit', { message }); await git.refreshStatus(); await git.refreshDiff(); }); }}
+          onCheckout={checkoutGitBranch}
+          onCreateBranch={async (name) => { await workspace.runWorkspaceOperation(async () => { await desktopInvoke('git_create_branch', { name }); await git.refreshStatus(); }); }}
+          onSelectFile={(path) => { git.setSelectedFile(path); void git.refreshDiff(git.baseCommit || git.commits[0]?.hash || 'HEAD', path); }}
+          onSelectCommit={(hash) => { git.setBaseCommit(hash); void git.refreshDiff(hash, git.selectedFile); }}
+          onRestore={async (hash) => { await workspace.runWorkspaceOperation(async ({ reload }) => { await desktopInvoke('git_restore', { hash }); await reload(); await git.refreshStatus(); }); }} />
+      ) : (
+        <Suspense fallback={<div className="p-4 text-sm text-[var(--ink-muted)]" aria-busy="true">{tx('Загрузка настроек…', 'Loading settings…')}</div>}><SettingsView desktopAvailable={!workspace.preview} themeMode={themeMode} positivePalette={posPalette} negativePalette={negPalette} locale={locale} gitEnabled={gitEnabled} aiProvider={aiProvider} aiModel={aiModel} customEndpoint={aiEndpoint} hasKey={hasAiApiKey} apiKeyDraft={aiApiKey} chatgptConnected={chatgptConnected} chatgptEmail={chatgptEmail} chatgptModels={chatgptModels}
+          rateLimits={{ rpm: aiLimits.rpm, rpd: aiLimits.rpd, tpm: aiLimits.tpm, totalTokens: aiLimits.tt }} usageEvents={usage.events} usageCounts={{ rpm: usage.counts.rpm, rpd: usage.counts.rpd, tpm: usage.counts.tpm, totalTokens: usage.counts.tt }}
+          onThemeChange={setThemeMode} onPositivePaletteChange={setPosPalette} onNegativePaletteChange={setNegPalette} onLocaleChange={setLocale} onGitEnabledChange={setGitEnabled} onProviderChange={handleProviderChange} onModelChange={setAiModel} onEndpointChange={setAiEndpoint} onApiKeyDraftChange={setAiApiKey}
+          onRateLimitsChange={(limits) => setAiLimits({ rpm: limits.rpm, rpd: limits.rpd, tpm: limits.tpm, tt: limits.totalTokens })} onSaveSettings={handleSaveSettings} onTestProvider={testSavedProvider}
+          onChatgptConnect={handleChatgptConnect} onChatgptDisconnect={handleChatgptDisconnect} onChatgptSwitchAccount={handleChatgptSwitchAccount} onChatgptRefreshModels={handleChatgptRefreshModels}
+          onResetTotal={handleResetTotalTokens} onSimulate={handleSimulateAiRequest} onRefreshUsage={usage.refresh} /></Suspense>
+      )}</div>)}
 
       {/* =================================================================
           FOOTER STATUSBAR (Variation 5 System Dark)
@@ -7644,13 +3939,12 @@ export function App() {
             onClick={() => {
               setActiveTab('settings');
               setActiveSettingsSection('git');
-              setGitHistoryOpen(true);
             }}
             className="cursor-pointer hover:text-[var(--ink)]"
           >
-            BRANCH: MAIN
+            {tx('ВЕТКА', 'BRANCH')}: {git.branch || (git.available ? tx('HEAD вне ветки', 'DETACHED HEAD') : '—')}
           </span>
-          <span>MODIFIED: {uncommittedChanges} CHANGES</span>
+          <span>{git.available ? `${tx('Изменено файлов', 'Modified files')}: ${git.uncommittedChanges}` : workspace.preview ? tx('Изменения предпросмотра сохраняются в браузере', 'Preview changes are saved in the browser') : tx('Статус Git недоступен', 'Git status is unavailable')}</span>
           {statusNotice && (
             <span style={{ color: 'var(--ctx-pos-text)' }}>
               ● {statusNotice}
@@ -7661,7 +3955,7 @@ export function App() {
         <div className="flex items-center gap-5">
           {activeTab === 'canvas' && (
             <div className="flex items-center gap-2">
-              <span>ZOOM: {canvasZoom}%</span>
+              <span>{tx('МАСШТАБ', 'ZOOM')}: {canvasZoom}%</span>
               <button
                 type="button"
                 onClick={() => setCanvasZoom((z) => Math.max(40, z - 10))}
@@ -7679,573 +3973,54 @@ export function App() {
             </div>
           )}
           <span>
-            КОНТЕКСТ ИИ (CTRL+ЛКМ):{' '}
-            {aiContextIds.length > 0 ? aiContextIds.length : 'ВЕСЬ ПРОЕКТ'}
+            {tx('Фокус ИИ (Ctrl+ЛКМ)', 'AI focus (Ctrl+click)')}: {' '}
+            {aiContextIds.length > 0 ? `${aiContextIds.length} ${tx('ID', 'IDs')}` : tx('Весь проект', 'Entire project')}
           </span>
           <span>
-            INDEX: {filteredElements.length}/{elements.length}
+            {tx('ЭЛЕМЕНТЫ', 'ITEMS')}: {filteredElements.length}/{elements.length}
           </span>
         </div>
       </footer>
 
-      {/* =================================================================
-          MODAL: Ассистент — Выбор раздела (AI Hub Launcher)
-         ================================================================= */}
-      {aiActiveModal === 'hub' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
-          <div className="w-full max-w-lg border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-4 sm:p-5 border-b border-[var(--border)] flex items-center justify-between bg-[var(--bg)]">
-              <div className="flex items-center gap-2.5">
-                <div
-                  style={{
-                    backgroundColor: 'var(--ctx-pos-soft)',
-                    borderColor: 'var(--ctx-pos-border)',
-                    color: 'var(--ctx-pos-text)',
-                  }}
-                  className="w-8 h-8 rounded-lg border flex items-center justify-center"
-                >
-                  <Sparkles size={16} />
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-[var(--ink)] tracking-tight">
-                    Ассистент
-                  </div>
-                  <div className="text-[11px] mono text-[var(--ink-muted)]">
-                    Выберите нужный раздел анализа
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAiActiveModal(null)}
-                className="btn p-1.5 shrink-0 rounded-lg hover:bg-[var(--surface-hover)]"
-                title="Закрыть"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="p-5 sm:p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-3.5">
-                {/* Card 1: Противоречия */}
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('contradictions')}
-                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ctx-neg-border)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
-                >
-                  <div
-                    style={{
-                      borderColor: 'var(--ctx-neg-border)',
-                      backgroundColor: 'var(--ctx-neg-soft)',
-                      color: 'var(--ctx-neg-text)',
-                    }}
-                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
-                  >
-                    <AlertTriangle size={26} />
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--ctx-neg-text)] transition-colors">
-                      Противоречия
-                    </div>
-                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
-                      {contradictions.length} найдено
-                    </div>
-                  </div>
-                </button>
-
-                {/* Card 2: Предложения */}
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('proposals')}
-                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ctx-pos-border)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
-                >
-                  <div
-                    style={{
-                      borderColor: 'var(--ctx-pos-border)',
-                      backgroundColor: 'var(--ctx-pos-soft)',
-                      color: 'var(--ctx-pos-text)',
-                    }}
-                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
-                  >
-                    <Lightbulb size={26} />
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--ctx-pos-text)] transition-colors">
-                      Предложения
-                    </div>
-                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
-                      {proposals.length} доступно
-                    </div>
-                  </div>
-                </button>
-
-                {/* Card 3: Интервью */}
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('interview')}
-                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--accent)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
-                >
-                  <div
-                    style={{
-                      borderColor: 'var(--border)',
-                      backgroundColor: 'var(--surface)',
-                      color: 'var(--accent)',
-                    }}
-                    className="w-14 h-14 rounded-xl border flex items-center justify-center group-hover:scale-105 transition-transform"
-                  >
-                    <MessageSquare size={26} />
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-[var(--ink)] group-hover:text-[var(--accent)] transition-colors">
-                      Интервью
-                    </div>
-                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
-                      {interviewQuestions.length} вопросов
-                    </div>
-                  </div>
-                </button>
-
-                {/* Card 4: Преобразование */}
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('transform')}
-                  className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg)] hover:bg-[var(--surface-hover)] hover:border-[var(--ink-muted)] transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2.5 group relative shadow-xs"
-                >
-                  <div className="w-14 h-14 rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] flex items-center justify-center group-hover:scale-105 transition-transform">
-                    <Workflow size={26} />
-                  </div>
-                  <div>
-                    <div className="text-xs font-semibold text-[var(--ink)] transition-colors">
-                      Преобразование
-                    </div>
-                    <div className="text-[10px] mono text-[var(--ink-muted)] mt-0.5">
-                      Развертывание
-                    </div>
-                  </div>
-                </button>
-              </div>
-
-              {/* Footer context info */}
-              <div className="pt-2 border-t border-[var(--border)] flex items-center justify-between text-[11px] mono text-[var(--ink-muted)]">
-                <span>
-                  Контекст:{' '}
-                  {aiContextIds.length > 0
-                    ? `${aiContextIds.length} элем.`
-                    : 'Весь проект'}
-                </span>
-                <span className="text-[10px]">Ctrl+ЛКМ для выбора</span>
-              </div>
-            </div>
-          </div>
-        </div>
+      {aiActiveModal !== null && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 text-sm text-white" aria-busy="true">{tx('Загрузка ассистента…', 'Loading assistant…')}</div>}>
+          <AiWorkflowDialogs
+            activeModal={aiActiveModal}
+            locale={locale}
+            aiContextIds={aiContextIds}
+            contradictionCount={contradictions.length}
+            contradictions={contradictions}
+            proposals={proposals}
+            interviewQuestions={interviewQuestions}
+            savedInterviewAnswers={savedInterviewAnswers}
+            interviewAnswerDrafts={interviewAnswerDrafts}
+            elements={elements}
+            transformSourceId={transformSourceId}
+            transformPattern={transformPattern}
+            transformSummary={transformSummary}
+            onSetActiveModal={setAiActiveModal}
+            onRunAnalysis={() => { void runAiAnalysis(); }}
+            onOpenContradiction={(contradiction) => {
+              const target = elements.find((element) => element.id === contradiction.elementIds[0]);
+              if (target) {
+                setSelectedId(target.id);
+                setActiveFile(target.fileName);
+                setActiveTab('kb');
+              }
+              setAiActiveModal(null);
+              openConflictPopupFor([contradiction], target?.id);
+            }}
+            onRunInterview={() => { void runProblemInterview(); }}
+            onApplyProposal={handleApplyProposal}
+            onRejectProposal={setRejectProposalModal}
+            onAnswerDraftsChange={setInterviewAnswerDrafts}
+            onSubmitInterviewAnswer={(question, answer) => { void submitInterviewAnswer(question, answer); }}
+            onTransformSourceChange={setTransformSourceId}
+            onTransformPatternChange={setTransformPattern}
+            onRunTransformation={(source, pattern) => { void runTransformation(source, pattern); }}
+          />
+        </Suspense>
       )}
-
-      {/* =================================================================
-          MODAL 1: Противоречия (Отдельный попап)
-         ================================================================= */}
-      {aiActiveModal === 'contradictions' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
-          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="panel-header">
-              <div className="flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('hub')}
-                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
-                  title="Вернуться к выбору разделов"
-                >
-                  <ArrowLeft size={13} />
-                  <span>К разделам</span>
-                </button>
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ctx-neg-text)]">
-                  <AlertTriangle size={15} />
-                  <span>Противоречия ({contradictions.length})</span>
-                </div>
-                <span className="pill text-[10px]">
-                  Контекст:{' '}
-                  {aiContextIds.length > 0
-                    ? aiContextIds.join(', ')
-                    : 'Весь проект'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAiActiveModal(null)}
-                className="btn py-1 px-2.5"
-              >
-                Закрыть
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3">
-              {contradictions.length === 0 ? (
-                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
-                  Активных противоречий и конфликтов в выбранном контексте не
-                  обнаружено.
-                </div>
-              ) : (
-                contradictions.map((c) => (
-                  <div
-                    key={c.id}
-                    className="p-3.5 border border-[var(--border)] rounded-lg bg-[var(--bg)] flex items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div
-                        className="text-xs font-semibold"
-                        style={{ color: 'var(--ctx-neg-text)' }}
-                      >
-                        ⚠ {c.title}
-                      </div>
-                      <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
-                        {c.description}
-                      </div>
-                      {c.elementIds.length > 0 && (
-                        <div className="flex items-center gap-1 pt-1 flex-wrap">
-                          <span className="text-[10px] text-[var(--ink-muted)]">
-                            Элементы:
-                          </span>
-                          {c.elementIds.map((eid) => (
-                            <button
-                              key={eid}
-                              type="button"
-                              onClick={() => {
-                                setSelectedId(eid);
-                                setAiActiveModal(null);
-                              }}
-                              className="pill text-[10px] cursor-pointer hover:border-[var(--accent)]"
-                            >
-                              {eid}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    {c.suggestedFix && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const { targetElementId, patch } = c.suggestedFix!;
-                          setElements((prev) =>
-                            prev.map((el) =>
-                              el.id === targetElementId
-                                ? { ...el, ...patch }
-                                : el
-                            )
-                          );
-                          setContradictions((prev) =>
-                            prev.filter((x) => x.id !== c.id)
-                          );
-                          showNotice(c.suggestedFix!.fixLabel);
-                        }}
-                        className="btn pos shrink-0 text-xs py-1.5 px-3"
-                      >
-                        Исправить
-                      </button>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =================================================================
-          MODAL 2: Предложения (Отдельный попап)
-         ================================================================= */}
-      {aiActiveModal === 'proposals' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
-          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="panel-header">
-              <div className="flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('hub')}
-                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
-                  title="Вернуться к выбору разделов"
-                >
-                  <ArrowLeft size={13} />
-                  <span>К разделам</span>
-                </button>
-                <div
-                  className="flex items-center gap-1.5 text-xs font-bold"
-                  style={{ color: 'var(--ctx-pos-text)' }}
-                >
-                  <Lightbulb size={15} />
-                  <span>Предложения ({proposals.length})</span>
-                </div>
-                <span className="pill text-[10px]">
-                  Контекст:{' '}
-                  {aiContextIds.length > 0
-                    ? aiContextIds.join(', ')
-                    : 'Весь проект'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAiActiveModal(null)}
-                className="btn py-1 px-2.5"
-              >
-                Закрыть
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3">
-              {proposals.length === 0 ? (
-                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
-                  Нет активных предложений для текущего контекста элементов.
-                </div>
-              ) : (
-                proposals.map((prop) => (
-                  <div
-                    key={prop.id}
-                    className="p-3.5 border border-[var(--border)] rounded-lg bg-[var(--bg)] flex items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="text-xs font-semibold text-[var(--ink)]">
-                        {prop.title}
-                      </div>
-                      <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
-                        {prop.rationale}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleApplyProposal(prop)}
-                        className="btn pos text-xs py-1.5 px-3"
-                      >
-                        Применить
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRejectProposalModal(prop)}
-                        className="btn neg text-xs py-1.5 px-3"
-                      >
-                        Отклонить
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =================================================================
-          MODAL 3: Проблемное интервью (Отдельный попап)
-         ================================================================= */}
-      {aiActiveModal === 'interview' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
-          <div className="w-full max-w-3xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="panel-header">
-              <div className="flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('hub')}
-                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
-                  title="Вернуться к выбору разделов"
-                >
-                  <ArrowLeft size={13} />
-                  <span>К разделам</span>
-                </button>
-                <div
-                  className="flex items-center gap-1.5 text-xs font-bold"
-                  style={{ color: 'var(--accent)' }}
-                >
-                  <MessageSquare size={15} />
-                  <span>Проблемное интервью ({interviewQuestions.length})</span>
-                </div>
-                <span className="pill text-[10px]">
-                  Контекст:{' '}
-                  {aiContextIds.length > 0
-                    ? aiContextIds.join(', ')
-                    : 'Весь проект'}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAiActiveModal(null)}
-                className="btn py-1 px-2.5"
-              >
-                Закрыть
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-3.5">
-              {interviewQuestions.length === 0 ? (
-                <div className="p-8 text-center text-xs text-[var(--ink-muted)] border border-dashed border-[var(--border)] rounded-xl">
-                  Вопросы для интервью отсутствуют.
-                </div>
-              ) : (
-                interviewQuestions.map((q) => (
-                  <div
-                    key={q.id}
-                    className="p-4 border border-[var(--border)] rounded-lg bg-[var(--bg)] space-y-2.5"
-                  >
-                    <div className="text-xs font-semibold text-[var(--ink)]">
-                      {q.question}
-                    </div>
-                    <div className="mono text-xs text-[var(--ink-muted)] leading-relaxed">
-                      {q.weakSpotContext}
-                    </div>
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      {q.quickOptions.map((opt, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => {
-                            if (q.targetElementId) {
-                              setElements((prev) =>
-                                prev.map((el) =>
-                                  el.id === q.targetElementId
-                                    ? {
-                                        ...el,
-                                        description: `${el.description} [Правило: ${opt}]`,
-                                      }
-                                    : el
-                                )
-                              );
-                            }
-                            showNotice(`Ответ записан в ${q.targetElementId}`);
-                          }}
-                          className="btn text-xs py-1.5 px-2.5"
-                        >
-                          → {opt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =================================================================
-          MODAL 4: Преобразование элемента (Отдельный попап)
-         ================================================================= */}
-      {aiActiveModal === 'transform' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 sm:p-6 backdrop-blur-xs">
-          <div className="w-full max-w-2xl max-h-[86vh] flex flex-col border border-[var(--border)] rounded-xl bg-[var(--surface)] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="panel-header">
-              <div className="flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setAiActiveModal('hub')}
-                  className="btn py-1 px-2.5 text-xs flex items-center gap-1.5"
-                  title="Вернуться к выбору разделов"
-                >
-                  <ArrowLeft size={13} />
-                  <span>К разделам</span>
-                </button>
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--ink)]">
-                  <Workflow size={15} />
-                  <span>Преобразование элемента</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAiActiveModal(null)}
-                className="btn py-1 px-2.5"
-              >
-                Закрыть
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4">
-              <div className="p-4 border border-[var(--border)] rounded-xl bg-[var(--bg)] space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="label block mb-1">
-                      Исходный элемент плана
-                    </label>
-                    <select
-                      value={transformSourceId}
-                      onChange={(e) => setTransformSourceId(e.target.value)}
-                      className="sys-input w-full mono text-xs"
-                    >
-                      {elements.map((el) => (
-                        <option key={el.id} value={el.id}>
-                          {el.id} — {el.title}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label block mb-1">
-                      Шаблон развёртывания
-                    </label>
-                    <select
-                      value={transformPattern}
-                      onChange={(e) =>
-                        setTransformPattern(
-                          e.target.value as
-                            | 'system_pack'
-                            | 'class_hierarchy'
-                            | 'process_chain'
-                        )
-                      }
-                      className="sys-input w-full text-xs"
-                    >
-                      <option value="system_pack">
-                        Система + Компонент + Класс
-                      </option>
-                      <option value="class_hierarchy">
-                        Класс + эталонный Объект (instance_of)
-                      </option>
-                      <option value="process_chain">
-                        Пошаговая Процесс-функция
-                      </option>
-                    </select>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const src =
-                      elements.find((e) => e.id === transformSourceId) ||
-                      elements[0];
-                    if (!src) return;
-                    const res = generateLocalTransformation(
-                      src,
-                      transformPattern
-                    );
-                    setElements((prev) => {
-                      const existingIds = new Set(prev.map((x) => x.id));
-                      const fresh = res.createdElements.filter(
-                        (x) => !existingIds.has(x.id)
-                      );
-                      return [...prev, ...fresh];
-                    });
-                    setUncommittedChanges((c) => c + 1);
-                    setTransformSummary(res.summary);
-                    showNotice(res.summary);
-                  }}
-                  className="btn pos text-xs py-2 px-4"
-                >
-                  Развернуть и добавить на Холст
-                </button>
-                {transformSummary && (
-                  <div
-                    style={{
-                      borderColor: 'var(--ctx-pos-border)',
-                      backgroundColor: 'var(--ctx-pos-soft)',
-                      color: 'var(--ctx-pos-text)',
-                    }}
-                    className="p-3 rounded-lg border mono text-xs leading-relaxed"
-                  >
-                    {transformSummary}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* =================================================================
           MODAL: Canvas AI Conflict Resolution Popup (Принять / Отклонить / Игнорировать)
          ================================================================= */}
@@ -8285,14 +4060,14 @@ export function App() {
                         }}
                         className="mono text-[10px] font-semibold px-2 py-0.5 rounded uppercase tracking-wider shrink-0"
                       >
-                        КОНФЛИКТ ИИ ·{' '}
+                        {tx('КОНФЛИКТ ИИ', 'AI CONFLICT')} ·{' '}
                         {currentConflict.severity === 'high'
-                          ? 'ВЫСОКИЙ'
-                          : 'СРЕДНИЙ'}
+                          ? tx('ВЫСОКИЙ', 'HIGH')
+                          : tx('СРЕДНИЙ', 'MEDIUM')}
                       </span>
                       {activeConflictPopup.triggerElementId && (
                         <span className="mono text-xs truncate">
-                          Узел: {activeConflictPopup.triggerElementId}
+                          {tx('Узел', 'Node')}: {activeConflictPopup.triggerElementId}
                         </span>
                       )}
                     </div>
@@ -8328,7 +4103,7 @@ export function App() {
                         onClick={() => setActiveConflictPopup(null)}
                         className="btn py-1 px-2.5 text-[11px]"
                       >
-                        Закрыть
+                        {tx('Закрыть', 'Close')}
                       </button>
                     </div>
                   </div>
@@ -8338,7 +4113,7 @@ export function App() {
                     {/* Affected Elements & Citation */}
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="label">Затронуты:</span>
+                        <span className="label">{tx('Затронуты:', 'Affected:')}</span>
                         {currentConflict.elementIds.map((eid) => (
                           <button
                             key={eid}
@@ -8367,10 +4142,15 @@ export function App() {
                               );
                             if (match) {
                               setActiveFile(match[1]);
-                              setLineRangeFilter({
-                                start: parseInt(match[2], 10),
-                                end: parseInt(match[3], 10),
-                              });
+                              const start = parseInt(match[2], 10);
+                              const end = parseInt(match[3], 10);
+                              const citedFileElement = elements.find((element) =>
+                                element.fileName === match[1] && currentConflict.elementIds.includes(element.id)
+                              ) || elements.find((element) => element.fileName === match[1]);
+                              if (citedFileElement) setSelectedId(citedFileElement.id);
+                              setLineRangeFilter({ fileName: match[1], start, end });
+                              setRangeStartInput(String(start));
+                              setRangeEndInput(String(end));
                               setKbEditorMode('raw_pgr');
                               setActiveTab('kb');
                               setActiveConflictPopup(null);
@@ -8379,7 +4159,7 @@ export function App() {
                           className="mono text-[11px] underline cursor-pointer"
                           style={{ color: 'var(--ctx-pos-text)' }}
                         >
-                          Открыть {currentConflict.fileCitation}
+                          {tx('Открыть', 'Open')} {currentConflict.fileCitation}
                         </button>
                       )}
                     </div>
@@ -8387,7 +4167,7 @@ export function App() {
                     {/* Conflict Title Input */}
                     <div>
                       <label className="label block mb-1.5">
-                        Название конфликта
+                        {tx('Название конфликта', 'Conflict title')}
                       </label>
                       <input
                         type="text"
@@ -8400,7 +4180,7 @@ export function App() {
                     {/* Conflict Description Textarea */}
                     <div>
                       <label className="label block mb-1.5">
-                        Описание конфликта
+                        {tx('Описание конфликта', 'Conflict description')}
                       </label>
                       <textarea
                         rows={3}
@@ -8423,11 +4203,13 @@ export function App() {
                           className="label"
                           style={{ color: 'var(--ctx-pos-text)' }}
                         >
-                          Предлагаемое исправление (Патч ИИ)
+                          {currentConflict.suggestedFix
+                            ? tx('Проверенный патч', 'Verified patch')
+                            : tx('Рекомендация для ручного исправления', 'Guidance for a manual fix')}
                         </span>
                         {currentConflict.suggestedFix?.targetElementId && (
                           <span className="mono text-[11px]">
-                            Цель:{' '}
+                            {tx('Цель:', 'Target:')}{' '}
                             <strong style={{ color: 'var(--ink)' }}>
                               {currentConflict.suggestedFix.targetElementId}
                             </strong>
@@ -8437,20 +4219,17 @@ export function App() {
 
                       <div>
                         <label className="label block mb-1">
-                          Описание исправления / правило
+                        {tx('Пояснение', 'Guidance')}
                         </label>
-                        <textarea
-                          rows={2}
-                          value={conflictFormFix}
-                          onChange={(e) => setConflictFormFix(e.target.value)}
-                          className="sys-input w-full leading-relaxed resize-y"
-                        />
+                        <p className="rounded border border-[var(--border)] bg-[var(--bg)] p-2.5 text-xs leading-relaxed">
+                          {conflictFormFix}
+                        </p>
                       </div>
 
                       {currentConflict.suggestedFix && (
                         <div>
                           <label className="label block mb-1">
-                            Действие патча ({currentConflict.suggestedFix.fixLabel})
+                            {tx('Действие патча', 'Patch action')} ({currentConflict.suggestedFix.fixLabel})
                           </label>
                           <pre className="p-2.5 rounded border border-[var(--border)] bg-[var(--bg)] mono text-[11px] overflow-x-auto">
                             {JSON.stringify(
@@ -8466,11 +4245,11 @@ export function App() {
                     {/* Optional Comment / Rejection Reason */}
                     <div>
                       <label className="label block mb-1.5">
-                        Комментарий / причина (при отклонении сохранит в Идеи-образы)
+                        {tx('Комментарий / причина (при отклонении сохранит в Идеи-образы)', 'Comment / reason (rejection saves this as an Idea)')}
                       </label>
                       <input
                         type="text"
-                        placeholder="Опционально: почему отклонено или примечание к решению..."
+                        placeholder={tx('Опционально: почему отклонено или примечание к решению...', 'Optional: why it was rejected or a note about the decision...')}
                         value={conflictFormComment}
                         onChange={(e) => setConflictFormComment(e.target.value)}
                         className="sys-input w-full"
@@ -8482,23 +4261,29 @@ export function App() {
                       <button
                         type="button"
                         onClick={handleAcceptConflictFix}
+                        disabled={!currentConflict.suggestedFix}
+                        title={!currentConflict.suggestedFix
+                          ? tx('Проверенный патч для этого конфликта недоступен.', 'No verified patch is available for this finding.')
+                          : undefined}
                         className="btn pos flex-1 py-2.5"
                       >
-                        Принять
+                        {currentConflict.suggestedFix
+                          ? tx('Применить патч', 'Apply patch')
+                          : tx('Патч недоступен', 'No verified patch')}
                       </button>
                       <button
                         type="button"
                         onClick={handleRejectConflict}
                         className="btn neg flex-1 py-2.5"
                       >
-                        Отклонить
+                        {tx('Отклонить', 'Reject')}
                       </button>
                       <button
                         type="button"
                         onClick={handleIgnoreConflict}
                         className="btn flex-1 py-2.5"
                       >
-                        Игнорировать
+                        {tx('Игнорировать', 'Ignore')}
                       </button>
                     </div>
                   </div>
@@ -8512,41 +4297,45 @@ export function App() {
           MODAL: Reject Proposal as Idea (with alt_to & alt_reason)
          ================================================================= */}
       {rejectProposalModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4">
-            <div className="section-title">
-              <span>Отклонить предложение в Идею-образ</span>
-            </div>
+        <Dialog
+          open={Boolean(rejectProposalModal)}
+          title={tx('Отклонить предложение в Идею-образ', 'Reject proposal as an Idea')}
+          onClose={() => setRejectProposalModal(null)}
+          closeLabel={tx('Закрыть', 'Close')}
+          actions={<div className="btn-group">
+            <button
+              type="button"
+              disabled={!rejectReasonInput.trim()}
+              onClick={handleConfirmRejectProposal}
+              className="btn pos flex-1"
+            >
+              {t.confirmYes}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRejectProposalModal(null)}
+              className="btn neg flex-1"
+            >
+              {t.confirmNo}
+            </button>
+          </div>}
+        >
+            <div className="space-y-4">
             <div className="mono">
-              Будет создана Идея-образ с полями{' '}
+              {tx('Будет создана Идея-образ с полями', 'An Idea will be created with fields')}{' '}
               <code>alt_to: {rejectProposalModal.targetElementId || '-'}</code>{' '}
-              и <code>alt_reason</code>.
+              {tx('и', 'and')} <code>alt_reason</code>.
             </div>
             <input
               type="text"
-              placeholder="Причина отказа (alt_reason)..."
+              placeholder={tx('Причина отказа (alt_reason)...', 'Reason for rejection (alt_reason)...')}
+              aria-label={tx('Причина отклонения', 'Rejection reason')}
               value={rejectReasonInput}
               onChange={(e) => setRejectReasonInput(e.target.value)}
               className="sys-input w-full"
             />
-            <div className="btn-group">
-              <button
-                type="button"
-                onClick={handleConfirmRejectProposal}
-                className="btn pos flex-1"
-              >
-                {t.confirmYes}
-              </button>
-              <button
-                type="button"
-                onClick={() => setRejectProposalModal(null)}
-                className="btn neg flex-1"
-              >
-                {t.confirmNo}
-              </button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       )}
 
       {/* =================================================================
@@ -8554,33 +4343,35 @@ export function App() {
          ================================================================= */}
       {newElementModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4">
-            <div className="section-title">
-              <span>Создать новый элемент плана</span>
+          <div role="dialog" aria-modal="true" aria-labelledby="create-element-title" className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4">
+            <div className="section-title" id="create-element-title">
+              <span>{tx('Создать новый элемент плана', 'Create plan element')}</span>
             </div>
 
             <div className="space-y-3">
               <div>
-                <div className="label mb-1">Тип элемента</div>
+                <label className="label mb-1 block" htmlFor="new-element-type">{tx('Тип элемента', 'Element type')}</label>
                 <select
+                  id="new-element-type"
                   value={newElType}
                   onChange={(e) => setNewElType(e.target.value as ElementType)}
                   className="sys-input w-full"
                 >
-                  <option value="system">Система (sys_)</option>
-                  <option value="class">Класс (cls_)</option>
-                  <option value="process">Процесс-функция (proc_)</option>
-                  <option value="component">Компонент (cmp_)</option>
-                  <option value="object">Объект (obj_)</option>
-                  <option value="idea">Идея-образ (idea_)</option>
+                  <option value="system">{tx('Система (sys_)', 'System (sys_)')}</option>
+                  <option value="class">{tx('Класс (cls_)', 'Class (cls_)')}</option>
+                  <option value="process">{tx('Процесс-функция (proc_)', 'Process function (proc_)')}</option>
+                  <option value="component">{tx('Компонент (cmp_)', 'Component (cmp_)')}</option>
+                  <option value="object">{tx('Объект (obj_)', 'Object (obj_)')}</option>
+                  <option value="idea">{tx('Идея-образ (idea_)', 'Idea (idea_)')}</option>
                 </select>
               </div>
 
               <div>
-                <div className="label mb-1">Название</div>
+                <label className="label mb-1 block" htmlFor="new-element-title">{tx('Название', 'Title')}</label>
                 <input
+                  id="new-element-title"
                   type="text"
-                  placeholder="Например: Зелье лечения"
+                  placeholder={tx('Например: Зелье лечения', 'For example: Healing potion')}
                   value={newElTitle}
                   onChange={(e) => setNewElTitle(e.target.value)}
                   className="sys-input w-full"
@@ -8590,9 +4381,10 @@ export function App() {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <div className="label mb-1">
-                    ID ({TYPE_PREFIXES[newElType]}...)
+                    <label htmlFor="new-element-id">ID ({TYPE_PREFIXES[newElType]}...)</label>
                   </div>
                   <input
+                    id="new-element-id"
                     type="text"
                     placeholder="healing_potion"
                     value={newElSlug}
@@ -8601,13 +4393,14 @@ export function App() {
                   />
                 </div>
                 <div>
-                  <div className="label mb-1">Файл .pgr</div>
+                  <label className="label mb-1 block" htmlFor="new-element-file">{tx('Файл .pgr', '.pgr file')}</label>
                   <select
+                    id="new-element-file"
                     value={newElFile}
                     onChange={(e) => setNewElFile(e.target.value)}
                     className="sys-input w-full mono"
                   >
-                    {(files.length > 0 ? files : ['sys_inventory.pgr']).map(
+                    {(files.length > 0 ? files : [newElFile || 'sys_core.pgr']).map(
                       (f) => (
                         <option key={f} value={f}>
                           {f}
@@ -8620,13 +4413,14 @@ export function App() {
 
               {newElType !== 'system' && (
                 <div>
-                  <div className="label mb-1">Родитель (parent)</div>
+                  <label className="label mb-1 block" htmlFor="new-element-parent">{tx('Родитель (parent)', 'Parent')}</label>
                   <select
+                    id="new-element-parent"
                     value={newElParent}
                     onChange={(e) => setNewElParent(e.target.value)}
                     className="sys-input w-full mono"
                   >
-                    <option value="-">- (без родителя)</option>
+                    <option value="-">{tx('- (без родителя)', '- (no parent)')}</option>
                     {elements
                       .filter((x) => x.type === 'system')
                       .map((s) => (
@@ -8644,7 +4438,7 @@ export function App() {
                   checked={newElMvp}
                   onChange={(e) => setNewElMvp(e.target.checked)}
                 />
-                <span>Метка фазы MVP</span>
+                <span>{tx('Метка фазы MVP', 'MVP phase')}</span>
               </label>
             </div>
 
@@ -8654,14 +4448,14 @@ export function App() {
                 onClick={handleCreateElement}
                 className="btn pos flex-1"
               >
-                {t.confirmYes}
+                {locale === 'ru' ? 'Создать' : 'Create'}
               </button>
               <button
                 type="button"
                 onClick={() => setNewElementModalOpen(false)}
                 className="btn neg flex-1"
               >
-                {t.confirmNo}
+                {locale === 'ru' ? 'Отмена' : 'Cancel'}
               </button>
             </div>
           </div>
@@ -8685,12 +4479,12 @@ export function App() {
           <div className="px-3 py-1.5 border-b border-[var(--border)] text-[10px] mono text-[var(--ink-muted)] flex items-center justify-between gap-1.5 bg-[var(--surface-hover)]">
             <span className="truncate">
               {kbContextMenu.target.type === 'file'
-                ? `Файл: ${kbContextMenu.target.fileName}`
+                ? `${tx('Файл', 'File')}: ${kbContextMenu.target.fileName}`
                 : kbContextMenu.target.type === 'element'
-                ? `Узел: ${kbContextMenu.target.elementId}`
+                ? `${tx('Узел', 'Node')}: ${kbContextMenu.target.elementId}`
                 : kbContextMenu.target.type === 'folder'
-                ? `Папка: ${kbContextMenu.target.folderName}/`
-                : `Проект: ${projectRootFolder}/`}
+                ? `${tx('Папка', 'Folder')}: ${kbContextMenu.target.folderName}/`
+                : `${tx('Проект', 'Project')}: ${projectRootFolder}/`}
             </span>
             {isItemStarred(kbContextMenu.target) && (
               <Star
@@ -8715,7 +4509,7 @@ export function App() {
               >
                 <div className="flex items-center gap-2">
                   <Plus size={14} className="text-[var(--accent)]" />
-                  <span>Создать новый...</span>
+                  <span>{tx('Создать новый...', 'Create new...')}</span>
                 </div>
                 <ChevronRight size={12} className="text-[var(--ink-muted)]" />
 
@@ -8730,7 +4524,7 @@ export function App() {
                       className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
                     >
                       <FilePlus size={13} className="text-[var(--accent)]" />
-                      <span>Файл (.pgr)</span>
+                      <span>{tx('Файл (.pgr)', 'File (.pgr)')}</span>
                     </button>
                     <button
                       type="button"
@@ -8741,7 +4535,7 @@ export function App() {
                       className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
                     >
                       <FolderPlus size={13} className="text-[var(--accent)]" />
-                      <span>Каталог (папка)</span>
+                      <span>{tx('Каталог (папка)', 'Directory (folder)')}</span>
                     </button>
                   </div>
                 )}
@@ -8756,7 +4550,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <ChevronRight size={14} className="text-[var(--ink-muted)]" />
-                <span>Свернуть все</span>
+                <span>{tx('Свернуть все', 'Collapse all')}</span>
               </button>
 
               <button
@@ -8768,7 +4562,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <ChevronDown size={14} className="text-[var(--ink-muted)]" />
-                <span>Развернуть все</span>
+                <span>{tx('Развернуть все', 'Expand all')}</span>
               </button>
 
               <div className="border-t border-[var(--border)] my-1" />
@@ -8782,7 +4576,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <Folder size={14} className="text-[var(--accent)]" />
-                <span>Показать в Проводнике</span>
+                <span>{tx('Показать в Проводнике', 'Show in Explorer')}</span>
               </button>
             </div>
           ) : (
@@ -8796,7 +4590,7 @@ export function App() {
               >
                 <div className="flex items-center gap-2">
                   <Plus size={14} className="text-[var(--accent)]" />
-                  <span>Создать новый...</span>
+                  <span>{tx('Создать новый...', 'Create new...')}</span>
                 </div>
                 <ChevronRight size={12} className="text-[var(--ink-muted)]" />
 
@@ -8818,8 +4612,23 @@ export function App() {
                       className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
                     >
                       <FilePlus size={13} className="text-[var(--accent)]" />
-                      <span>Файл (.pgr)</span>
+                      <span>{tx('Файл (.pgr)', 'File (.pgr)')}</span>
                     </button>
+                    {kbContextMenu.target.type === 'file' ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = kbContextMenu.target;
+                          if (target.type !== 'file') return;
+                          setKbContextMenu(null);
+                          openNewElementModal(target.fileName);
+                        }}
+                        className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
+                      >
+                        <Plus size={13} className="text-[var(--accent)]" />
+                        <span>{tx('Элемент', 'Element')}</span>
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => {
@@ -8829,11 +4638,69 @@ export function App() {
                       className="w-full text-left px-3 py-1.5 hover:bg-[var(--surface-hover)] flex items-center gap-2 text-[var(--ink)] cursor-pointer"
                     >
                       <FolderPlus size={13} className="text-[var(--accent)]" />
-                      <span>Каталог (папка)</span>
+                      <span>{tx('Каталог (папка)', 'Directory (folder)')}</span>
                     </button>
                   </div>
                 )}
               </div>
+
+              {kbContextMenu.target.type === 'file' && contextFileLibrary && (() => {
+                const removeFromLibrary = contextFileLibrary.elementCount > 0 && contextFileLibrary.missingCount === 0;
+                const disabled = contextFileLibrary.elementCount === 0;
+                return (
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    title={disabled ? tx('В файле пока нет элементов', 'This file has no elements yet') : undefined}
+                    onClick={() => {
+                      const fileName = contextFileLibrary.fileName;
+                      setKbContextMenu(null);
+                      handleToggleFileLibrary(fileName);
+                    }}
+                    className={`w-full text-left px-2.5 py-1.5 rounded flex items-center gap-2 text-xs transition-colors ${
+                      disabled
+                        ? 'opacity-40 cursor-not-allowed text-[var(--ink-muted)]'
+                        : removeFromLibrary
+                          ? 'hover:bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)] cursor-pointer'
+                          : 'hover:bg-[var(--surface-hover)] text-[var(--ink)] cursor-pointer'
+                    }`}
+                  >
+                    {removeFromLibrary
+                      ? <Trash2 size={14} className="text-[var(--ctx-neg-text)]" />
+                      : <Plus size={14} className="text-[var(--accent)]" />}
+                    <span>{removeFromLibrary ? tx('Удалить из библиотеки', 'Remove from library') : tx('Добавить в библиотеку', 'Add to library')}</span>
+                    {contextFileLibrary.elementCount > 0 && contextFileLibrary.missingCount > 0 && (
+                      <span className="ml-auto text-[10px] mono text-[var(--ink-muted)]">
+                        {contextFileLibrary.elementCount - contextFileLibrary.missingCount}/{contextFileLibrary.elementCount}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()}
+
+              {kbContextMenu.target.type === 'element' && contextElementLibrary && (
+                <button
+                  type="button"
+                  disabled={!contextElementLibrary.exists}
+                  onClick={() => {
+                    const elementId = contextElementLibrary.elementId;
+                    setKbContextMenu(null);
+                    handleToggleElementLibrary(elementId);
+                  }}
+                  className={`w-full text-left px-2.5 py-1.5 rounded flex items-center gap-2 text-xs transition-colors ${
+                    !contextElementLibrary.exists
+                      ? 'opacity-40 cursor-not-allowed text-[var(--ink-muted)]'
+                      : contextElementLibrary.saved
+                        ? 'hover:bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)] cursor-pointer'
+                        : 'hover:bg-[var(--surface-hover)] text-[var(--ink)] cursor-pointer'
+                  }`}
+                >
+                  {contextElementLibrary.saved
+                    ? <Trash2 size={14} className="text-[var(--ctx-neg-text)]" />
+                    : <Plus size={14} className="text-[var(--accent)]" />}
+                  <span>{contextElementLibrary.saved ? tx('Удалить из библиотеки', 'Remove from library') : tx('Добавить в библиотеку', 'Add to library')}</span>
+                </button>
+              )}
 
               {/* Переименовать */}
               <button
@@ -8846,7 +4713,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <Edit2 size={14} className="text-[var(--ink-muted)]" />
-                <span>Переименовать</span>
+                <span>{tx('Переименовать', 'Rename')}</span>
               </button>
 
               {/* Удалить (только для файла) */}
@@ -8864,7 +4731,13 @@ export function App() {
                   className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)] flex items-center gap-2 text-xs cursor-pointer transition-colors"
                 >
                   <Trash2 size={14} className="text-[var(--ctx-neg-text)]" />
-                  <span>Удалить</span>
+                  <span>{tx('Удалить', 'Delete')}</span>
+                </button>
+              )}
+              {kbContextMenu.target.type === 'folder' && (
+                <button type="button" onClick={() => { const folder = kbContextMenu.target.type === 'folder' ? kbContextMenu.target.folderName : ''; setKbContextMenu(null); handleDeleteFolder(folder); }} className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--ctx-neg-soft)] text-[var(--ctx-neg-text)] flex items-center gap-2 text-xs cursor-pointer">
+                  <Trash2 size={14} />
+                  <span>{tx('Удалить папку и содержимое', 'Delete folder and contents')}</span>
                 </button>
               )}
 
@@ -8880,7 +4753,7 @@ export function App() {
               >
                 <div className="flex items-center gap-2">
                   <Scissors size={14} className="text-[var(--ink-muted)]" />
-                  <span>Вырезать</span>
+                <span>{tx('Вырезать', 'Cut')}</span>
                 </div>
                 <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+X</span>
               </button>
@@ -8897,7 +4770,7 @@ export function App() {
               >
                 <div className="flex items-center gap-2">
                   <Copy size={14} className="text-[var(--ink-muted)]" />
-                  <span>Скопировать</span>
+                <span>{tx('Скопировать', 'Copy')}</span>
                 </div>
                 <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+C</span>
               </button>
@@ -8920,8 +4793,8 @@ export function App() {
                 <div className="flex items-center gap-2">
                   <Clipboard size={14} className="text-[var(--ink-muted)]" />
                   <span>
-                    Вставить
-                    {kbClipboard ? ` (${kbClipboard.mode === 'cut' ? 'вырез.' : 'копия'})` : ''}
+                    {tx('Вставить', 'Paste')}
+                    {kbClipboard ? ` (${kbClipboard.mode === 'cut' ? tx('вырез.', 'cut') : tx('копия', 'copy')})` : ''}
                   </span>
                 </div>
                 <span className="text-[10px] mono text-[var(--ink-muted)]">Ctrl+V</span>
@@ -8938,7 +4811,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <CopyPlus size={14} className="text-[var(--ink-muted)]" />
-                <span>Дублировать</span>
+                <span>{tx('Дублировать', 'Duplicate')}</span>
               </button>
 
               <div className="border-t border-[var(--border)] my-1" />
@@ -8954,7 +4827,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <Folder size={14} className="text-[var(--accent)]" />
-                <span>Показать в Проводнике</span>
+                <span>{tx('Показать в Проводнике', 'Show in Explorer')}</span>
               </button>
 
               {/* Отметить как важное / Снять отметку */}
@@ -8974,7 +4847,7 @@ export function App() {
                       style={{ color: 'var(--ctx-neg-text)' }}
                       className="shrink-0"
                     />
-                    <span>Снять отметку</span>
+                    <span>{tx('Снять отметку', 'Remove bookmark')}</span>
                   </>
                 ) : (
                   <>
@@ -8986,7 +4859,7 @@ export function App() {
                       }}
                       className="shrink-0"
                     />
-                    <span>Отметить как важное</span>
+                    <span>{tx('Отметить как важное', 'Mark as important')}</span>
                   </>
                 )}
               </button>
@@ -9004,7 +4877,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <Link size={14} className="text-[var(--ink-muted)]" />
-                <span>Скопировать относительный путь</span>
+                <span>{tx('Скопировать относительный путь', 'Copy relative path')}</span>
               </button>
 
               {/* Скопировать путь */}
@@ -9018,7 +4891,7 @@ export function App() {
                 className="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-hover)] flex items-center gap-2 text-xs text-[var(--ink)] cursor-pointer transition-colors"
               >
                 <Link size={14} className="text-[var(--accent)]" />
-                <span>Скопировать путь</span>
+                <span>{tx('Скопировать путь', 'Copy path')}</span>
               </button>
             </div>
           )}
@@ -9029,31 +4902,32 @@ export function App() {
           MODAL: Rename File or Element
          ================================================================= */}
       {renameModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
-            <div className="section-title">
-              <span>
-                {renameModal.type === 'file'
-                  ? 'Переименовать файл'
-                  : 'Переименовать элемент'}
-              </span>
-            </div>
+        <Dialog
+          open={Boolean(renameModal)}
+          title={renameModal.type === 'file'
+            ? tx('Переименовать файл', 'Rename file')
+            : renameModal.type === 'folder' ? tx('Переименовать папку', 'Rename folder') : tx('Переименовать элемент', 'Rename element')}
+          onClose={() => setRenameModal(null)}
+          closeLabel={tx('Закрыть', 'Close')}
+          actions={<div className="btn-group">
+            <button type="button" onClick={handleConfirmRename} className="btn pos flex-1">{tx('Сохранить', 'Save')}</button>
+            <button type="button" onClick={() => setRenameModal(null)} className="btn neg flex-1">{tx('Отмена', 'Cancel')}</button>
+          </div>}
+        >
+          <div className="space-y-4">
             <div className="mono text-xs text-[var(--ink-muted)]">
-              Текущее имя: <code>{renameModal.currentName}</code>
+              {tx('Текущее имя', 'Current name')}: <code>{renameModal.currentName}</code>
             </div>
             <input
               type="text"
-              placeholder={
-                renameModal.type === 'file'
-                  ? 'Новое имя файла (e.g. sys_new.pgr)...'
-                  : 'Новый ID элемента...'
-              }
+              aria-label={renameModal.type === 'file'
+                ? tx('Новое имя файла', 'New file name')
+                : renameModal.type === 'folder' ? tx('Новое имя папки', 'New folder name') : tx('Новый ID элемента', 'New element ID')}
+              placeholder={renameModal.type === 'file'
+                ? tx('Новое имя файла (e.g. sys_new.pgr)...', 'New file name (e.g. sys_new.pgr)...')
+                : renameModal.type === 'folder' ? tx('Новое имя папки...', 'New folder name...') : tx('Новый ID элемента...', 'New element ID...')}
               value={renameModal.newName}
-              onChange={(e) =>
-                setRenameModal((prev) =>
-                  prev ? { ...prev, newName: e.target.value } : null
-                )
-              }
+              onChange={(e) => setRenameModal((prev) => prev ? { ...prev, newName: e.target.value } : null)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleConfirmRename();
                 if (e.key === 'Escape') setRenameModal(null);
@@ -9061,57 +4935,40 @@ export function App() {
               autoFocus
               className="sys-input w-full mono"
             />
-            <div className="btn-group">
-              <button
-                type="button"
-                onClick={handleConfirmRename}
-                className="btn pos flex-1"
-              >
-                Сохранить
-              </button>
-              <button
-                type="button"
-                onClick={() => setRenameModal(null)}
-                className="btn neg flex-1"
-              >
-                Отмена
-              </button>
-            </div>
           </div>
-        </div>
+        </Dialog>
       )}
 
       {/* =================================================================
           MODAL: Create New File / Folder Resource
          ================================================================= */}
       {newResourceModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
-            <div className="section-title">
-              <span>
-                {newResourceModal.type === 'file'
-                  ? 'Создать новый файл .pgr'
-                  : 'Создать новый каталог (папку)'}
-              </span>
-            </div>
+        <Dialog
+          open={Boolean(newResourceModal)}
+          title={newResourceModal.type === 'file'
+            ? tx('Создать новый файл .pgr', 'Create new .pgr file')
+            : tx('Создать новый каталог (папку)', 'Create new directory (folder)')}
+          onClose={() => setNewResourceModal(null)}
+          closeLabel={tx('Закрыть', 'Close')}
+          actions={<div className="btn-group">
+            <button type="button" onClick={handleCreateResourceConfirm} className="btn pos flex-1">{tx('Создать', 'Create')}</button>
+            <button type="button" onClick={() => setNewResourceModal(null)} className="btn neg flex-1">{tx('Отмена', 'Cancel')}</button>
+          </div>}
+        >
+          <div className="space-y-4">
             {newResourceModal.parentFolder && (
               <div className="mono text-xs text-[var(--ink-muted)]">
-                В каталоге: <code>{newResourceModal.parentFolder}/</code>
+                {tx('В каталоге', 'In directory')}: <code>{newResourceModal.parentFolder}/</code>
               </div>
             )}
             <input
               type="text"
-              placeholder={
-                newResourceModal.type === 'file'
-                  ? 'Имя файла (e.g. sys_module_2.pgr)...'
-                  : 'Имя папки (e.g. systems, core, entities)...'
-              }
+              aria-label={newResourceModal.type === 'file' ? tx('Имя файла', 'File name') : tx('Имя папки', 'Folder name')}
+              placeholder={newResourceModal.type === 'file'
+                ? tx('Имя файла (e.g. sys_module_2.pgr)...', 'File name (e.g. sys_module_2.pgr)...')
+                : tx('Имя папки (e.g. systems, core, entities)...', 'Folder name (e.g. systems, core, entities)...')}
               value={newResourceModal.name}
-              onChange={(e) =>
-                setNewResourceModal((prev) =>
-                  prev ? { ...prev, name: e.target.value } : null
-                )
-              }
+              onChange={(e) => setNewResourceModal((prev) => prev ? { ...prev, name: e.target.value } : null)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleCreateResourceConfirm();
                 if (e.key === 'Escape') setNewResourceModal(null);
@@ -9119,60 +4976,52 @@ export function App() {
               autoFocus
               className="sys-input w-full mono"
             />
-            <div className="btn-group">
-              <button
-                type="button"
-                onClick={handleCreateResourceConfirm}
-                className="btn pos flex-1"
-              >
-                Создать
-              </button>
-              <button
-                type="button"
-                onClick={() => setNewResourceModal(null)}
-                className="btn neg flex-1"
-              >
-                Отмена
-              </button>
-            </div>
           </div>
-        </div>
+        </Dialog>
       )}
 
       {/* =================================================================
           MODAL: Delete File Confirmation
          ================================================================= */}
       {deleteFileConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md border border-[var(--border)] rounded-lg bg-[var(--surface)] p-5 space-y-4 shadow-2xl">
-            <div className="section-title text-[var(--ctx-neg-text)]">
-              <span>Удаление файла</span>
-            </div>
-            <div className="text-xs">
-              Вы действительно хотите удалить файл <code>{deleteFileConfirm}</code>?
-              <br />
-              <span className="text-[var(--ink-muted)]">
-                Все элементы, привязанные к этому файлу, также будут удалены.
-              </span>
-            </div>
-            <div className="btn-group">
-              <button
-                type="button"
-                onClick={handleConfirmDeleteFile}
-                className="btn neg flex-1"
-              >
-                Удалить файл
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeleteFileConfirm(null)}
-                className="btn flex-1"
-              >
-                Отмена
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog
+          open={Boolean(deleteFileConfirm)}
+          title={tx('Удаление файла', 'Delete file')}
+          description={tx('Все элементы, привязанные к этому файлу, также будут удалены.', 'All elements assigned to this file will also be deleted.')}
+          onClose={() => setDeleteFileConfirm(null)}
+          closeLabel={tx('Закрыть', 'Close')}
+          actions={<div className="btn-group">
+            <button type="button" onClick={handleConfirmDeleteFile} className="btn neg flex-1">{tx('Удалить файл', 'Delete file')}</button>
+            <button type="button" onClick={() => setDeleteFileConfirm(null)} className="btn flex-1">{tx('Отмена', 'Cancel')}</button>
+          </div>}
+        >
+          <p className="text-xs">{tx('Вы действительно хотите удалить файл', 'Are you sure you want to delete file')} <code>{deleteFileConfirm}</code>?</p>
+        </Dialog>
+      )}
+      {deleteFolderConfirm && (
+        <Dialog
+          open={Boolean(deleteFolderConfirm)}
+          title={tx('Удаление папки', 'Delete folder')}
+          onClose={() => setDeleteFolderConfirm(null)}
+          closeLabel={tx('Закрыть', 'Close')}
+          actions={<div className="btn-group">
+            <button type="button" className="btn neg flex-1" onClick={handleConfirmDeleteFolder}>{tx('Удалить папку', 'Delete folder')}</button>
+            <button type="button" className="btn flex-1" onClick={() => setDeleteFolderConfirm(null)}>{tx('Отмена', 'Cancel')}</button>
+          </div>}
+        >
+          <p className="text-xs">{tx('Удалить папку', 'Delete folder')} <code>{deleteFolderConfirm}</code> {tx('и все её файлы и элементы?', 'and all its files and elements?')}</p>
+        </Dialog>
+      )}
+      {pendingAiReview && (
+        <AiChangeReviewDialog
+          locale={locale}
+          summary={pendingAiReview.summary}
+          createdElements={pendingAiReview.kind === 'transform' ? pendingAiReview.createdElements : undefined}
+          before={pendingAiReview.kind === 'patch' ? pendingAiReview.before : undefined}
+          patch={pendingAiReview.kind === 'patch' ? pendingAiReview.patch : undefined}
+          onApply={applyPendingAiReview}
+          onDiscard={() => setPendingAiReview(null)}
+        />
       )}
     </div>
   );

@@ -12,7 +12,12 @@ export default defineConfig({
   },
   server: {
     port: 3000,
-    host: '0.0.0.0',
-    hmr: false,
+    strictPort: true,
+    host: 'localhost',
+    hmr: process.env.TAURI_DEV_HOST
+      ? { host: process.env.TAURI_DEV_HOST, protocol: 'ws', port: 3001 }
+      : undefined,
+    watch: { ignored: ['**/src-tauri/**'] },
   },
+  clearScreen: false,
 });

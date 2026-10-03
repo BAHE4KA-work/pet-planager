@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Planager",
+  "version": "0.1.0",
+  "identifier": "com.petplanager.desktop",
+  "build": {
+    "beforeDevCommand": "node ./node_modules/vite/bin/vite.js --host localhost",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "node ./node_modules/vite/bin/vite.js build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Planager",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 740,
+        "minHeight": 520,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "Visual planning workspace",
+    "icon": ["icons/icon.ico"]
+  }
+}

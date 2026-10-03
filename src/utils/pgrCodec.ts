@@ -1,4 +1,4 @@
-import {
+import type {
   ClassField,
   ClassMethod,
   DiffLine,
@@ -26,6 +26,30 @@ export const TYPE_PREFIXES: Record<ElementType, string> = {
   object: 'obj_',
   idea: 'idea_',
 };
+
+const DESCRIPTION_SECTION_MARKERS = new Set([
+  'поля:', 'методы:', 'компоненты:', 'использует:', 'взаимодействует:',
+  'шаги:', 'интерфейс:', 'внутренняя логика:', 'значения:', 'notes:', 'аннотирует:',
+]);
+
+function escapeDescriptionLine(line: string): string {
+  const match = line.match(/^(\s*)(.*?)(\s*)$/);
+  if (!match) return line;
+  const [, leading, body, trailing] = match;
+  const escapedMarker = body.startsWith('\\') ? body.slice(1) : '';
+  if (body === '---' || DESCRIPTION_SECTION_MARKERS.has(body.toLowerCase()) ||
+      escapedMarker === '---' || DESCRIPTION_SECTION_MARKERS.has(escapedMarker.toLowerCase())) {
+    return `${leading}\\${body}${trailing}`;
+  }
+  return line;
+}
+
+function unescapeDescriptionLine(line: string): string {
+  const match = line.match(/^(\s*)(\\*)(---|Поля:|Методы:|Компоненты:|Использует:|Взаимодействует:|Шаги:|Интерфейс:|Внутренняя логика:|Значения:|notes:|аннотирует:)(\s*)$/i);
+  if (!match) return line;
+  const slashCount = match[2].length;
+  return slashCount ? `${match[1]}${'\\'.repeat(slashCount - 1)}${match[3]}${match[4]}` : line;
+}
 
 /**
  * Serializes a single PlanElement into its canonical, line-stable .pgr block string.
@@ -76,7 +100,7 @@ export function serializeElementToPgr(el: PlanElement): string {
   }
 
   lines.push('');
-  lines.push(el.description.trim() || 'Описание не задано.');
+  lines.push(...(el.description.trim() || 'Описание не задано.').split('\n').map(escapeDescriptionLine));
 
   if (el.type === 'class') {
     if (el.fields && el.fields.length > 0) {
@@ -134,6 +158,11 @@ export function serializeElementToPgr(el: PlanElement): string {
   }
 
   if (el.type === 'component') {
+    if (el.components && el.components.length > 0) {
+      lines.push('');
+      lines.push('Компоненты:');
+      for (const c of el.components) lines.push(`- ${c}`);
+    }
     if (el.interfaceItems && el.interfaceItems.length > 0) {
       lines.push('');
       lines.push('Интерфейс:');
@@ -233,36 +262,37 @@ export function parsePgrFileContent(
   existingElements: PlanElement[]
 ): PlanElement[] {
   const blocks = rawText
-    .split(/\n---\n/)
+    .replace(/\r\n?/g, '\n')
+    .split(/\n\s*---\s*\n/)
     .map((b) => b.trim())
     .filter(Boolean);
 
   const parsedElements: PlanElement[] = [];
+  const ids = new Set<string>();
+  const typeByHeader = new Map(Object.entries(TYPE_HEADERS_RU).map(([type, label]) => [label.toLowerCase(), type as ElementType]));
+  const prefixByType: Record<ElementType, RegExp> = {
+    system: /^sys_[A-Za-z0-9_-]+$/, class: /^cls_[A-Za-z0-9_-]+$/,
+    process: /^proc_[A-Za-z0-9_-]+$/, component: /^cmp_[A-Za-z0-9_-]+$/,
+    object: /^obj_[A-Za-z0-9_-]+$/, idea: /^idea_[A-Za-z0-9_-]+$/,
+  };
 
   blocks.forEach((block, blockIdx) => {
     const lines = block.split('\n');
     const headerLine = lines[0]?.trim() || '';
     const headerMatch = headerLine.match(/^##\s*([^:]+):\s*(.+)$/);
 
-    let type: ElementType = 'class';
-    let title = 'Новый элемент';
+    if (!headerMatch) throw new Error(`PGR block ${blockIdx + 1}: неверный заголовок элемента`);
+    const type = typeByHeader.get(headerMatch[1].trim().toLowerCase());
+    if (!type) throw new Error(`PGR block ${blockIdx + 1}: неподдерживаемый тип "${headerMatch[1].trim()}"`);
+    const title = headerMatch[2].trim();
+    if (!title) throw new Error(`PGR block ${blockIdx + 1}: пустой заголовок`);
 
-    if (headerMatch) {
-      const rawType = headerMatch[1].trim().toLowerCase();
-      title = headerMatch[2].trim();
-      if (rawType.includes('систем')) type = 'system';
-      else if (rawType.includes('класс')) type = 'class';
-      else if (rawType.includes('процесс')) type = 'process';
-      else if (rawType.includes('компонент')) type = 'component';
-      else if (rawType.includes('объект')) type = 'object';
-      else if (rawType.includes('идея')) type = 'idea';
-    }
-
-    let id = `${TYPE_PREFIXES[type]}parsed_${blockIdx + 1}`;
+    let id = '';
     let parent = '-';
     let extendsId = '-';
     let instanceOf = '-';
     let mvp = false;
+    let status: PlanElement['status'] = 'черновик';
     let customColor: string | undefined;
     let originIdeaId: string | undefined;
     let altTo: string | undefined;
@@ -291,6 +321,7 @@ export function parsePgrFileContent(
       | 'internal'
       | 'values'
       | 'notes' = 'header';
+    const headerKeys = new Set<string>();
 
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
@@ -305,15 +336,40 @@ export function parsePgrFileContent(
         if (kv) {
           const key = kv[1].toLowerCase();
           const val = kv[2].trim();
+          if (headerKeys.has(key)) throw new Error(`PGR block ${blockIdx + 1}: повторяющееся поле заголовка "${key}"`);
+          headerKeys.add(key);
+          const allowedForType: Record<ElementType, string[]> = {
+            system: ['id', 'status', 'mvp', 'color', 'origin'],
+            class: ['id', 'parent', 'extends', 'status', 'mvp', 'color', 'origin'],
+            process: ['id', 'parent', 'status', 'mvp', 'color', 'origin'],
+            component: ['id', 'parent', 'status', 'mvp', 'color', 'origin'],
+            object: ['id', 'parent', 'instance_of', 'status', 'mvp', 'color', 'origin'],
+            idea: ['id', 'parent', 'status', 'mvp', 'color', 'origin', 'alt_to', 'alt_reason', 'notes'],
+          };
+          if (!allowedForType[type].includes(key)) {
+            throw new Error(`PGR block ${blockIdx + 1}: поле заголовка "${key}" не поддерживается для типа ${type}`);
+          }
           if (key === 'id') id = val;
           else if (key === 'parent') parent = val || '-';
           else if (key === 'extends') extendsId = val || '-';
           else if (key === 'instance_of') instanceOf = val || '-';
-          else if (key === 'mvp') mvp = val === 'да' || val === 'true';
+          else if (key === 'status') {
+            if (val !== 'черновик') throw new Error(`PGR block ${blockIdx + 1}: неподдерживаемый status "${val}"`);
+            status = val;
+          }
+          else if (key === 'mvp') {
+            if (!['да', 'нет', 'true', 'false'].includes(val.toLowerCase())) {
+              throw new Error(`PGR block ${blockIdx + 1}: неверное значение mvp "${val}" (ожидается да/нет)`);
+            }
+            mvp = val.toLowerCase() === 'да' || val.toLowerCase() === 'true';
+          }
           else if (key === 'color') customColor = val;
           else if (key === 'origin') originIdeaId = val;
           else if (key === 'alt_to') altTo = val;
           else if (key === 'alt_reason') altReason = val;
+          else if (!['id', 'parent', 'extends', 'instance_of', 'status', 'mvp', 'color', 'origin', 'alt_to', 'alt_reason', 'notes'].includes(key)) {
+            throw new Error(`PGR block ${blockIdx + 1}: неизвестное поле заголовка "${key}"`);
+          }
           else if (key === 'notes') {
             currentSection = 'notes';
           }
@@ -362,15 +418,16 @@ export function parsePgrFileContent(
       }
 
       if (currentSection === 'description') {
-        descriptionLines.push(line);
+        descriptionLines.push(unescapeDescriptionLine(line));
       } else if (currentSection === 'fields' && trimmed.startsWith('-')) {
         const body = trimmed.replace(/^-\s*/, '');
-        const fieldMatch = body.match(/^([^:]+):\s*([^—-]+?)\s*[—-]\s*(.+)$/);
-        if (fieldMatch) {
+        const separator = body.indexOf(' — ');
+        const fieldParts = separator >= 0 ? body.slice(0, separator).match(/^([^:]+):\s*(.*)$/) : null;
+        if (fieldParts) {
           fields.push({
-            name: fieldMatch[1].trim(),
-            dataType: fieldMatch[2].trim(),
-            description: fieldMatch[3].trim(),
+            name: fieldParts[1].trim(),
+            dataType: fieldParts[2].trim(),
+            description: body.slice(separator + 3),
           });
         } else {
           const simpleMatch = body.match(/^([^:]+):\s*(.+)$/);
@@ -385,12 +442,12 @@ export function parsePgrFileContent(
       } else if (currentSection === 'methods' && (trimmed.startsWith('+') || trimmed.startsWith('-'))) {
         const vis = trimmed.startsWith('+') ? '+' : '-';
         const body = trimmed.slice(1).trim();
-        const mMatch = body.match(/^([^—-]+?)\s*[—-]\s*(.+)$/);
-        if (mMatch) {
+        const separator = body.indexOf(' — ');
+        if (separator >= 0) {
           methods.push({
             visibility: vis,
-            signature: mMatch[1].trim(),
-            description: mMatch[2].trim(),
+            signature: body.slice(0, separator),
+            description: body.slice(separator + 3),
           });
         } else {
           methods.push({
@@ -416,11 +473,11 @@ export function parsePgrFileContent(
         if (val) internalLogic.push(val);
       } else if (currentSection === 'values' && trimmed.startsWith('-')) {
         const body = trimmed.replace(/^-\s*/, '');
-        const vMatch = body.match(/^([^:]+):\s*(.+)$/);
+        const vMatch = body.match(/^([^:]+):(?:\s(.*))?$/);
         if (vMatch) {
           values.push({
             fieldName: vMatch[1].trim(),
-            value: vMatch[2].trim(),
+            value: vMatch[2] ?? '',
           });
         }
       } else if (currentSection === 'notes' && trimmed.startsWith('-')) {
@@ -428,6 +485,10 @@ export function parsePgrFileContent(
         if (val && val !== '-') notes.push(val);
       }
     }
+
+    if (!id || !prefixByType[type].test(id)) throw new Error(`PGR block ${blockIdx + 1}: отсутствует или неверный ID для типа ${type}`);
+    if (ids.has(id)) throw new Error(`PGR block ${blockIdx + 1}: дублирующийся ID ${id}`);
+    ids.add(id);
 
     const existing = existingElements.find((e) => e.id === id);
 
@@ -437,11 +498,11 @@ export function parsePgrFileContent(
       title,
       fileName,
       parent: type === 'system' ? '-' : parent,
-      description: descriptionLines.join('\n').trim() || 'Описание элемента.',
-      status: 'черновик',
+      description: descriptionLines.join('\n').trim(),
+      status,
       mvp,
-      customColor: customColor ?? existing?.customColor,
-      originIdeaId: originIdeaId ?? existing?.originIdeaId,
+      customColor,
+      originIdeaId,
       position: existing?.position || {
         x: 120 + (blockIdx % 3) * 340,
         y: 120 + Math.floor(blockIdx / 3) * 240,
@@ -550,7 +611,13 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
   const edges: GraphEdge[] = [];
   const warnings: { elementId: string; message: string }[] = [];
   const byId = new Map<string, PlanElement>();
-  elements.forEach((e) => byId.set(e.id, e));
+  elements.forEach((e) => {
+    if (byId.has(e.id)) {
+      warnings.push({ elementId: e.id, message: `Дублирующийся ID элемента ${e.id}` });
+    } else {
+      byId.set(e.id, e);
+    }
+  });
 
   // Helper to check 'extends' cycle
   function hasExtendsCycle(startId: string): boolean {
@@ -566,6 +633,20 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
   }
 
   for (const el of elements) {
+    if (el.altTo && el.altTo !== '-') {
+      const target = byId.get(el.altTo);
+      if (el.type !== 'idea' || !target) {
+        warnings.push({ elementId: el.id, message: `alt_to ссылается на неизвестный элемент ${el.altTo}` });
+      }
+    }
+
+    if (el.originIdeaId) {
+      const origin = byId.get(el.originIdeaId);
+      if (!origin || origin.type !== 'idea') {
+        warnings.push({ elementId: el.id, message: `origin ссылается на неизвестную идею ${el.originIdeaId}` });
+      }
+    }
+
     // 1. contains: Система -> любой элемент (parent: sys_*)
     if (el.type !== 'system' && el.parent && el.parent !== '-') {
       const parentEl = byId.get(el.parent);
@@ -646,6 +727,7 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
           valid: isValid,
           validationMessage: isValid ? undefined : `Компонент ${cmpId} не найден`,
         });
+        if (!isValid) warnings.push({ elementId: el.id, message: `has ссылается на неизвестный компонент ${cmpId}` });
       }
     }
 
@@ -662,6 +744,7 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
           valid: isValid,
           validationMessage: isValid ? undefined : `Целевой элемент ${targetId} не найден`,
         });
+        if (!isValid) warnings.push({ elementId: el.id, message: `uses ссылается на неизвестный элемент ${targetId}` });
       }
     }
 
@@ -670,13 +753,16 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
       for (const noteTargetId of el.notes || []) {
         if (noteTargetId === '-') continue;
         const targetEl = byId.get(noteTargetId);
+        const isValid = !!targetEl;
         edges.push({
           id: `edge_notes_${el.id}_${noteTargetId}`,
           source: el.id,
           target: noteTargetId,
           relation: 'notes',
-          valid: !!targetEl,
+          valid: isValid,
+          validationMessage: isValid ? undefined : `Целевой элемент ${noteTargetId} не найден`,
         });
+        if (!isValid) warnings.push({ elementId: el.id, message: `notes ссылается на неизвестный элемент ${noteTargetId}` });
       }
     }
   }
@@ -688,8 +774,8 @@ export function buildAndValidateGraph(elements: PlanElement[]): {
  * Computes a clean line-by-line diff between two .pgr file strings for Git versioning view.
  */
 export function computeLineDiff(oldText: string, newText: string): DiffLine[] {
-  const oldLines = oldText ? oldText.split('\n') : [];
-  const newLines = newText ? newText.split('\n') : [];
+  const oldLines = oldText ? oldText.replace(/\r\n?/g, '\n').split('\n') : [];
+  const newLines = newText ? newText.replace(/\r\n?/g, '\n').split('\n') : [];
 
   // LCS matrix for accurate, minimal git-like diffs
   const m = oldLines.length;

@@ -1,0 +1,28 @@
+export const I18N_DICTIONARY = {
+  ru: {
+    tabKb: 'База знаний',
+    tabCanvas: 'Холст',
+    tabLibrary: 'Библиотека юнитов',
+    tabSettings: 'Настройки',
+    aiBtn: 'ИИ-ассистент',
+    projectFilesHeader: 'Файлы проекта',
+    legendHeader: 'Легенда',
+    categoriesHeader: 'Категории',
+    sectionsHeader: 'Разделы',
+    confirmYes: 'Да',
+    confirmNo: 'Нет',
+  },
+  en: {
+    tabKb: 'Knowledge Base',
+    tabCanvas: 'Canvas',
+    tabLibrary: 'Unit Library',
+    tabSettings: 'Settings',
+    aiBtn: 'AI Assistant',
+    projectFilesHeader: 'Project Files',
+    legendHeader: 'Legend',
+    categoriesHeader: 'Categories',
+    sectionsHeader: 'Sections',
+    confirmYes: 'Yes',
+    confirmNo: 'No',
+  },
+};
